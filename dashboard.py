@@ -890,59 +890,49 @@ function renderSessionsTable(sessions) {
 
 function renderModelCostTable(byModel) {
   document.getElementById('model-cost-body').innerHTML = byModel.map(m => {
-    const billable = isBillable(m.model);
-    const cost = calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation);
-    const p = getPricing(m.model);
+    const billable = m.billable;
     const na = '<td class="cost-na">n/a</td>';
+
     const totalInputSide = m.input + m.cache_read + m.cache_creation;
+    const totalInputCost = m.input_cost + m.cache_read_cost + m.cache_creation_cost;
 
-    // Per-component costs
-    const inputCost = (billable && p) ? m.input * p.input / 1e6 : 0;
-    const outputCost = (billable && p) ? m.output * p.output / 1e6 : 0;
-    const cacheReadCost = (billable && p) ? m.cache_read * p.cache_read / 1e6 : 0;
-    const cacheCreationCost = (billable && p) ? m.cache_creation * p.cache_write / 1e6 : 0;
+    const costSub = (v) => billable
+      ? `<br><span class="cost" style="font-size:11px">(${fmtCost(v)})</span>`
+      : '';
 
-    const costSub = (v) => billable ? `<br><span class="cost" style="font-size:11px">(${fmtCost(v)})</span>` : '';
+    const costCell    = billable ? `<td class="cost">${fmtCost(m.cost)}</td>` : na;
+    const costPerTurn = (billable && m.turns > 0)
+      ? `<td class="cost">${fmtCost(m.cost / m.turns)}</td>` : na;
 
-    // Cost cells
-    const costCell = billable ? `<td class="cost">${fmtCost(cost)}</td>` : na;
-    const costPerTurn = (billable && m.turns > 0) ? `<td class="cost">${fmtCost(cost / m.turns)}</td>` : na;
-
-    // Effective $/1M input: actual input-side spend / total input-side tokens * 1M
+    // Effective $/1M input-side = total input-side spend / total input-side tokens
     let effInCell = na;
-    if (billable && p && totalInputSide > 0) {
-      const totalInputCost = inputCost + cacheReadCost + cacheCreationCost;
+    if (billable && totalInputSide > 0) {
       const effIn = totalInputCost / totalInputSide * 1e6;
       effInCell = `<td class="cost">$${effIn.toFixed(2)}</td>`;
     }
 
-    // Effective $/1M output
+    // Effective $/1M output = output_cost / output_tokens (equals model output price)
     let effOutCell = na;
-    if (billable && p && m.output > 0) {
-      effOutCell = `<td class="cost">$${p.output.toFixed(2)}</td>`;
+    if (billable && m.output > 0) {
+      const effOut = m.output_cost / m.output * 1e6;
+      effOutCell = `<td class="cost">$${effOut.toFixed(2)}</td>`;
     }
 
-    // Cache hit rate: cache_read / (input + cache_read + cache_creation)
-    let cacheHitCell = na;
-    if (totalInputSide > 0) {
-      const hitRate = m.cache_read / totalInputSide * 100;
-      cacheHitCell = `<td class="num">${hitRate.toFixed(1)}%</td>`;
-    }
+    const cacheHitCell = totalInputSide > 0
+      ? `<td class="num">${(m.cache_read / totalInputSide * 100).toFixed(1)}%</td>`
+      : na;
 
-    // Cache savings: tokens read from cache * (full_price - cache_price) / 1M
-    let cacheSavingsCell = na;
-    if (billable && p && m.cache_read > 0) {
-      const savings = m.cache_read * (p.input - p.cache_read) / 1e6;
-      cacheSavingsCell = `<td class="cost">${fmtCost(savings)}</td>`;
-    }
+    const cacheSavingsCell = (billable && m.cache_read > 0)
+      ? `<td class="cost">${fmtCost(m.cache_savings)}</td>`
+      : na;
 
     return `<tr>
       <td><span class="model-tag" style="${getModelTagStyle(m.model)}">${m.model}</span></td>
-      <td class="num">${fmt(m.turns)}${costSub(cost)}</td>
-      <td class="num">${fmt(m.input)}${costSub(inputCost)}</td>
-      <td class="num">${fmt(m.output)}${costSub(outputCost)}</td>
-      <td class="num">${fmt(m.cache_read)}${costSub(cacheReadCost)}</td>
-      <td class="num">${fmt(m.cache_creation)}${costSub(cacheCreationCost)}</td>
+      <td class="num">${fmt(m.turns)}${costSub(m.cost)}</td>
+      <td class="num">${fmt(m.input)}${costSub(m.input_cost)}</td>
+      <td class="num">${fmt(m.output)}${costSub(m.output_cost)}</td>
+      <td class="num">${fmt(m.cache_read)}${costSub(m.cache_read_cost)}</td>
+      <td class="num">${fmt(m.cache_creation)}${costSub(m.cache_creation_cost)}</td>
       ${costCell}${costPerTurn}${effInCell}${effOutCell}
       ${cacheHitCell}${cacheSavingsCell}
     </tr>`;
