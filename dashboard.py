@@ -1,5 +1,5 @@
 """
-dashboard.py - Local web dashboard served on localhost:8080.
+dashboard.py - Local web dashboard served on localhost:8087.
 """
 
 import json
@@ -11,12 +11,17 @@ from datetime import datetime
 DB_PATH = Path.home() / ".claude" / "usage.db"
 
 
-def get_dashboard_data(db_path=DB_PATH):
+def get_dashboard_data(db_path=DB_PATH, tz_offset=0):
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+
+    # Build local-day SQL expression: adjust UTC timestamp by tz_offset minutes
+    # tz_offset is positive for east-of-UTC (e.g. Moscow UTC+3 → tz_offset=180)
+    sign = '+' if tz_offset >= 0 else '-'
+    local_day = f"substr(datetime(timestamp, '{sign}{abs(tz_offset)} minutes'), 1, 10)"
 
     # ── All models (for filter UI) ────────────────────────────────────────────
     model_rows = conn.execute("""
@@ -28,9 +33,9 @@ def get_dashboard_data(db_path=DB_PATH):
     all_models = [r["model"] for r in model_rows]
 
     # ── Daily per-model, ALL history (client filters by range) ────────────────
-    daily_rows = conn.execute("""
+    daily_rows = conn.execute(f"""
         SELECT
-            substr(timestamp, 1, 10)   as day,
+            {local_day}                as day,
             COALESCE(model, 'unknown') as model,
             SUM(input_tokens)          as input,
             SUM(output_tokens)         as output,
@@ -123,6 +128,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .filter-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); white-space: nowrap; }
   .filter-sep { width: 1px; height: 22px; background: var(--border); flex-shrink: 0; }
   #model-checkboxes { display: flex; flex-wrap: wrap; gap: 6px; }
+  #other-models-details { margin-left: 4px; }
+  #other-models-details summary { font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; padding: 3px 0; }
+  #other-models-details summary:hover { color: var(--text); }
+  #other-models-wrap { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
   .model-cb-label { display: flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; border: 1px solid var(--border); cursor: pointer; font-size: 12px; color: var(--muted); transition: border-color 0.15s, color 0.15s, background 0.15s; user-select: none; }
   .model-cb-label:hover { border-color: var(--accent); color: var(--text); }
   .model-cb-label.checked { background: rgba(217,119,87,0.12); border-color: var(--accent); color: var(--text); }
@@ -134,6 +143,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .range-btn:last-child { border-right: none; }
   .range-btn:hover { background: rgba(255,255,255,0.04); color: var(--text); }
   .range-btn.active { background: rgba(217,119,87,0.15); color: var(--accent); font-weight: 600; }
+  .date-inputs { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .date-inputs input[type="date"] { background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px; padding: 4px 8px; outline: none; }
+  .date-inputs input[type="date"]:focus { border-color: var(--accent); }
+  .date-inputs span { color: var(--muted); font-size: 11px; }
 
   .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
   .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
@@ -181,15 +194,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="filter-bar">
   <div class="filter-label">Models</div>
   <div id="model-checkboxes"></div>
+  <details id="other-models-details" style="display:none">
+    <summary>Other (<span id="other-models-count">0</span>)</summary>
+    <div id="other-models-wrap"></div>
+  </details>
   <button class="filter-btn" onclick="selectAllModels()">All</button>
   <button class="filter-btn" onclick="clearAllModels()">None</button>
   <div class="filter-sep"></div>
   <div class="filter-label">Range</div>
   <div class="range-group">
+    <button class="range-btn" data-range="1d"  onclick="setRange('1d')">1d</button>
     <button class="range-btn" data-range="7d"  onclick="setRange('7d')">7d</button>
     <button class="range-btn" data-range="30d" onclick="setRange('30d')">30d</button>
     <button class="range-btn" data-range="90d" onclick="setRange('90d')">90d</button>
     <button class="range-btn" data-range="all" onclick="setRange('all')">All</button>
+  </div>
+  <div class="date-inputs">
+    <input type="date" id="date-from" onchange="onCustomDateChange()">
+    <span>&ndash;</span>
+    <input type="date" id="date-to" onchange="onCustomDateChange()">
   </div>
 </div>
 
@@ -225,6 +248,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <thead><tr>
         <th>Model</th><th>Turns</th><th>Input</th><th>Output</th>
         <th>Cache Read</th><th>Cache Creation</th><th>Est. Cost</th>
+        <th>Cost/Turn</th><th>Eff. $/1M In</th><th>Eff. $/1M Out</th>
+        <th>Cache Hit</th><th>Cache Savings</th>
       </tr></thead>
       <tbody id="model-cost-body"></tbody>
     </table>
@@ -312,20 +337,33 @@ const TOKEN_COLORS = {
 const MODEL_COLORS = ['#d97757','#4f8ef7','#4ade80','#a78bfa','#fbbf24','#f472b6','#34d399','#60a5fa'];
 
 // ── Time range ─────────────────────────────────────────────────────────────
-const RANGE_LABELS = { '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time' };
-const RANGE_TICKS  = { '7d': 7, '30d': 15, '90d': 13, 'all': 12 };
+const RANGE_LABELS = { '1d': 'Today', '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time', 'custom': 'Custom Range' };
+const RANGE_TICKS  = { '1d': 1, '7d': 7, '30d': 15, '90d': 13, 'all': 12, 'custom': 15 };
 
 function getRangeCutoff(range) {
-  if (range === 'all') return null;
-  const days = range === '7d' ? 7 : range === '30d' ? 30 : 90;
+  if (range === 'all') return { from: null, to: null };
+  if (range === 'custom') {
+    const f = document.getElementById('date-from').value || null;
+    const t = document.getElementById('date-to').value || null;
+    return { from: f, to: t };
+  }
+  const days = range === '1d' ? 0 : range === '7d' ? 7 : range === '30d' ? 30 : 90;
   const d = new Date();
   d.setDate(d.getDate() - days);
-  return d.toISOString().slice(0, 10);
+  return { from: d.toISOString().slice(0, 10), to: null };
 }
 
 function readURLRange() {
-  const p = new URLSearchParams(window.location.search).get('range');
-  return ['7d', '30d', '90d', 'all'].includes(p) ? p : '30d';
+  const params = new URLSearchParams(window.location.search);
+  const fromDate = params.get('from');
+  const toDate = params.get('to');
+  if (fromDate || toDate) {
+    if (fromDate) document.getElementById('date-from').value = fromDate;
+    if (toDate) document.getElementById('date-to').value = toDate;
+    return 'custom';
+  }
+  const p = params.get('range');
+  return ['1d', '7d', '30d', '90d', 'all'].includes(p) ? p : '30d';
 }
 
 function setRange(range) {
@@ -333,6 +371,17 @@ function setRange(range) {
   document.querySelectorAll('.range-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.range === range)
   );
+  if (range !== 'custom') {
+    document.getElementById('date-from').value = '';
+    document.getElementById('date-to').value = '';
+  }
+  updateURL();
+  applyFilter();
+}
+
+function onCustomDateChange() {
+  selectedRange = 'custom';
+  document.querySelectorAll('.range-btn').forEach(btn => btn.classList.remove('active'));
   updateURL();
   applyFilter();
 }
@@ -365,14 +414,27 @@ function buildFilterUI(allModels) {
     return pa !== pb ? pa - pb : a.localeCompare(b);
   });
   selectedModels = readURLModels(allModels);
-  const container = document.getElementById('model-checkboxes');
-  container.innerHTML = sorted.map(m => {
+  const mainModels = sorted.filter(m => isBillable(m));
+  const otherModels = sorted.filter(m => !isBillable(m));
+
+  const makeCb = m => {
     const checked = selectedModels.has(m);
     return `<label class="model-cb-label ${checked ? 'checked' : ''}" data-model="${m}">
       <input type="checkbox" value="${m}" ${checked ? 'checked' : ''} onchange="onModelToggle(this)">
       ${m}
     </label>`;
-  }).join('');
+  };
+
+  document.getElementById('model-checkboxes').innerHTML = mainModels.map(makeCb).join('');
+
+  const otherDetails = document.getElementById('other-models-details');
+  if (otherModels.length > 0) {
+    otherDetails.style.display = '';
+    document.getElementById('other-models-count').textContent = otherModels.length;
+    document.getElementById('other-models-wrap').innerHTML = otherModels.map(makeCb).join('');
+  } else {
+    otherDetails.style.display = 'none';
+  }
 }
 
 function onModelToggle(cb) {
@@ -384,14 +446,14 @@ function onModelToggle(cb) {
 }
 
 function selectAllModels() {
-  document.querySelectorAll('#model-checkboxes input').forEach(cb => {
+  document.querySelectorAll('#model-checkboxes input, #other-models-wrap input').forEach(cb => {
     cb.checked = true; selectedModels.add(cb.value); cb.closest('label').classList.add('checked');
   });
   updateURL(); applyFilter();
 }
 
 function clearAllModels() {
-  document.querySelectorAll('#model-checkboxes input').forEach(cb => {
+  document.querySelectorAll('#model-checkboxes input, #other-models-wrap input').forEach(cb => {
     cb.checked = false; selectedModels.delete(cb.value); cb.closest('label').classList.remove('checked');
   });
   updateURL(); applyFilter();
@@ -399,9 +461,16 @@ function clearAllModels() {
 
 // ── URL persistence ────────────────────────────────────────────────────────
 function updateURL() {
-  const allModels = Array.from(document.querySelectorAll('#model-checkboxes input')).map(cb => cb.value);
+  const allModels = Array.from(document.querySelectorAll('#model-checkboxes input, #other-models-wrap input')).map(cb => cb.value);
   const params = new URLSearchParams();
-  if (selectedRange !== '30d') params.set('range', selectedRange);
+  if (selectedRange === 'custom') {
+    const f = document.getElementById('date-from').value;
+    const t = document.getElementById('date-to').value;
+    if (f) params.set('from', f);
+    if (t) params.set('to', t);
+  } else if (selectedRange !== '30d') {
+    params.set('range', selectedRange);
+  }
   if (!isDefaultModelSelection(allModels)) params.set('models', Array.from(selectedModels).join(','));
   const search = params.toString() ? '?' + params.toString() : '';
   history.replaceState(null, '', window.location.pathname + search);
@@ -411,11 +480,17 @@ function updateURL() {
 function applyFilter() {
   if (!rawData) return;
 
-  const cutoff = getRangeCutoff(selectedRange);
+  const range = getRangeCutoff(selectedRange);
+
+  function inRange(day) {
+    if (range.from && day < range.from) return false;
+    if (range.to && day > range.to) return false;
+    return true;
+  }
 
   // Filter daily rows by model + date range
   const filteredDaily = rawData.daily_by_model.filter(r =>
-    selectedModels.has(r.model) && (!cutoff || r.day >= cutoff)
+    selectedModels.has(r.model) && inRange(r.day)
   );
 
   // Daily chart: aggregate by day
@@ -444,7 +519,7 @@ function applyFilter() {
 
   // Filter sessions by model + date range
   const filteredSessions = rawData.sessions_all.filter(s =>
-    selectedModels.has(s.model) && (!cutoff || s.last_date >= cutoff)
+    selectedModels.has(s.model) && inRange(s.last_date)
   );
 
   // Add session counts into modelMap
@@ -476,7 +551,13 @@ function applyFilter() {
   };
 
   // Update daily chart title
-  document.getElementById('daily-chart-title').textContent = 'Daily Token Usage \u2014 ' + RANGE_LABELS[selectedRange];
+  let rangeTitle = RANGE_LABELS[selectedRange];
+  if (selectedRange === 'custom') {
+    const f = document.getElementById('date-from').value;
+    const t = document.getElementById('date-to').value;
+    rangeTitle = (f || '...') + ' \u2014 ' + (t || '...');
+  }
+  document.getElementById('daily-chart-title').textContent = 'Daily Token Usage \u2014 ' + rangeTitle;
 
   renderStats(totals);
   renderDailyChart(daily);
@@ -488,7 +569,7 @@ function applyFilter() {
 
 // ── Renderers ──────────────────────────────────────────────────────────────
 function renderStats(t) {
-  const rangeLabel = RANGE_LABELS[selectedRange].toLowerCase();
+  const rangeLabel = selectedRange === 'custom' ? 'custom range' : RANGE_LABELS[selectedRange].toLowerCase();
   const stats = [
     { label: 'Sessions',       value: t.sessions.toLocaleString(), sub: rangeLabel },
     { label: 'Turns',          value: fmt(t.turns),                sub: rangeLabel },
@@ -599,18 +680,61 @@ function renderSessionsTable(sessions) {
 
 function renderModelCostTable(byModel) {
   document.getElementById('model-cost-body').innerHTML = byModel.map(m => {
+    const billable = isBillable(m.model);
     const cost = calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation);
-    const costCell = isBillable(m.model)
-      ? `<td class="cost">${fmtCost(cost)}</td>`
-      : `<td class="cost-na">n/a</td>`;
+    const p = getPricing(m.model);
+    const na = '<td class="cost-na">n/a</td>';
+    const totalInputSide = m.input + m.cache_read + m.cache_creation;
+
+    // Per-component costs
+    const inputCost = (billable && p) ? m.input * p.input / 1e6 : 0;
+    const outputCost = (billable && p) ? m.output * p.output / 1e6 : 0;
+    const cacheReadCost = (billable && p) ? m.cache_read * p.cache_read / 1e6 : 0;
+    const cacheCreationCost = (billable && p) ? m.cache_creation * p.cache_write / 1e6 : 0;
+
+    const costSub = (v) => billable ? `<br><span class="cost" style="font-size:11px">(${fmtCost(v)})</span>` : '';
+
+    // Cost cells
+    const costCell = billable ? `<td class="cost">${fmtCost(cost)}</td>` : na;
+    const costPerTurn = (billable && m.turns > 0) ? `<td class="cost">${fmtCost(cost / m.turns)}</td>` : na;
+
+    // Effective $/1M input: actual input-side spend / total input-side tokens * 1M
+    let effInCell = na;
+    if (billable && p && totalInputSide > 0) {
+      const totalInputCost = inputCost + cacheReadCost + cacheCreationCost;
+      const effIn = totalInputCost / totalInputSide * 1e6;
+      effInCell = `<td class="cost">$${effIn.toFixed(2)}</td>`;
+    }
+
+    // Effective $/1M output
+    let effOutCell = na;
+    if (billable && p && m.output > 0) {
+      effOutCell = `<td class="cost">$${p.output.toFixed(2)}</td>`;
+    }
+
+    // Cache hit rate: cache_read / (input + cache_read + cache_creation)
+    let cacheHitCell = na;
+    if (totalInputSide > 0) {
+      const hitRate = m.cache_read / totalInputSide * 100;
+      cacheHitCell = `<td class="num">${hitRate.toFixed(1)}%</td>`;
+    }
+
+    // Cache savings: tokens read from cache * (full_price - cache_price) / 1M
+    let cacheSavingsCell = na;
+    if (billable && p && m.cache_read > 0) {
+      const savings = m.cache_read * (p.input - p.cache_read) / 1e6;
+      cacheSavingsCell = `<td class="cost">${fmtCost(savings)}</td>`;
+    }
+
     return `<tr>
       <td><span class="model-tag">${m.model}</span></td>
-      <td class="num">${fmt(m.turns)}</td>
-      <td class="num">${fmt(m.input)}</td>
-      <td class="num">${fmt(m.output)}</td>
-      <td class="num">${fmt(m.cache_read)}</td>
-      <td class="num">${fmt(m.cache_creation)}</td>
-      ${costCell}
+      <td class="num">${fmt(m.turns)}${costSub(cost)}</td>
+      <td class="num">${fmt(m.input)}${costSub(inputCost)}</td>
+      <td class="num">${fmt(m.output)}${costSub(outputCost)}</td>
+      <td class="num">${fmt(m.cache_read)}${costSub(cacheReadCost)}</td>
+      <td class="num">${fmt(m.cache_creation)}${costSub(cacheCreationCost)}</td>
+      ${costCell}${costPerTurn}${effInCell}${effOutCell}
+      ${cacheHitCell}${cacheSavingsCell}
     </tr>`;
   }).join('');
 }
@@ -678,7 +802,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def serve(port=8080):
+def serve(port=8087):
     server = HTTPServer(("localhost", port), DashboardHandler)
     print(f"Dashboard running at http://localhost:{port}")
     print("Press Ctrl+C to stop.")
