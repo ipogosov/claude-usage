@@ -166,6 +166,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .model-cb-label input { display: none; }
   .filter-btn { padding: 3px 10px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; white-space: nowrap; }
   .filter-btn:hover { border-color: var(--accent); color: var(--text); }
+  .update-btn { padding: 4px 14px; border-radius: 6px; border: 1px solid var(--accent); background: rgba(217,119,87,0.12); color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background 0.15s; }
+  .update-btn:hover { background: rgba(217,119,87,0.22); }
+  .update-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .auto-update-label { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap; }
+  .auto-update-label input { accent-color: var(--accent); cursor: pointer; }
   .range-group { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; flex-shrink: 0; }
   .range-btn { padding: 4px 13px; background: transparent; border: none; border-right: 1px solid var(--border); color: var(--muted); font-size: 12px; cursor: pointer; transition: background 0.15s, color 0.15s; }
   .range-btn:last-child { border-right: none; }
@@ -242,6 +247,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <span>&ndash;</span>
     <input type="date" id="date-to" onchange="onCustomDateChange()">
   </div>
+  <div class="filter-sep"></div>
+  <button class="update-btn" id="update-btn" onclick="triggerUpdate()">Update</button>
+  <label class="auto-update-label">
+    <input type="checkbox" id="auto-update-cb" onchange="toggleAutoUpdate(this.checked)">
+    Auto-update
+  </label>
 </div>
 
 <div class="container">
@@ -820,6 +831,8 @@ function renderModelCostTable(byModel) {
 }
 
 // ── Data loading ───────────────────────────────────────────────────────────
+let autoUpdateTimer = null;
+
 async function loadData() {
   try {
     const resp = await fetch('/api/data?tz=' + getTzOffset());
@@ -828,18 +841,16 @@ async function loadData() {
       document.body.innerHTML = '<div style="padding:40px;color:#f87171">' + d.error + '</div>';
       return;
     }
-    document.getElementById('meta').textContent = 'Updated: ' + d.generated_at + ' \u00b7 Auto-refresh in 30s';
+    document.getElementById('meta').textContent = 'Updated: ' + d.generated_at;
 
     const isFirstLoad = rawData === null;
     rawData = d;
 
     if (isFirstLoad) {
-      // Restore range from URL, mark active button
       selectedRange = readURLRange();
       document.querySelectorAll('.range-btn').forEach(btn =>
         btn.classList.toggle('active', btn.dataset.range === selectedRange)
       );
-      // Build model filter (reads URL for model selection too)
       buildFilterUI(d.all_models);
     }
 
@@ -849,8 +860,27 @@ async function loadData() {
   }
 }
 
+async function triggerUpdate() {
+  const btn = document.getElementById('update-btn');
+  btn.disabled = true;
+  btn.textContent = 'Scanning…';
+  try {
+    await fetch('/api/scan', { method: 'POST' });
+    await loadData();
+  } catch(e) {
+    console.error(e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Update';
+  }
+}
+
+function toggleAutoUpdate(enabled) {
+  if (autoUpdateTimer) { clearInterval(autoUpdateTimer); autoUpdateTimer = null; }
+  if (enabled) autoUpdateTimer = setInterval(triggerUpdate, 30000);
+}
+
 loadData();
-setInterval(loadData, 30000);
 </script>
 </body>
 </html>
@@ -884,6 +914,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/api/scan":
+            from scanner import scan
+            scan(verbose=False)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
         else:
             self.send_response(404)
             self.end_headers()
