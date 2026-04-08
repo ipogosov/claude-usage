@@ -737,17 +737,20 @@ function renderProjectChart(byProject) {
 
 function renderSessionsTable(sessions) {
   document.getElementById('sessions-body').innerHTML = sessions.map(s => {
-    const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
-    const costCell = isBillable(s.model)
-      ? `<td class="cost">${fmtCost(cost)}</td>`
+    const hasBillable = s.models.some(m => isBillable(m));
+    const costCell = hasBillable
+      ? `<td class="cost">${fmtCost(s.cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
+    const modelTags = s.models
+      .map(m => `<span class="model-tag">${m}</span>`)
+      .join(' ');
     return `<tr>
       <td class="muted" style="font-family:monospace">${s.session_id}&hellip;</td>
       <td>${s.project}</td>
       <td class="muted">${s.last}</td>
       <td class="muted">${s.duration_min}m</td>
-      <td><span class="model-tag">${s.model}</span></td>
-      <td class="num">${s.turns}</td>
+      <td>${modelTags}</td>
+      <td class="num">${fmt(s.turns)}</td>
       <td class="num">${fmt(s.input)}</td>
       <td class="num">${fmt(s.output)}</td>
       ${costCell}
