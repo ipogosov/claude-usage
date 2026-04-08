@@ -134,83 +134,169 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claude Code Usage Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #0f1117;
-    --card: #1a1d27;
-    --border: #2a2d3a;
-    --text: #e2e8f0;
-    --muted: #8892a4;
+    --bg: #0a0c12;
+    --card: #111420;
+    --card-hover: #161a28;
+    --border: #1c2030;
+    --border-muted: #242838;
+    --text: #dde3ed;
+    --muted: #60718a;
     --accent: #d97757;
-    --blue: #4f8ef7;
-    --green: #4ade80;
+    --blue: #5b9cf6;
+    --green: #3ecf6e;
+    --purple: #a78bfa;
+    --yellow: #f5c542;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
 
-  header { background: var(--card); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
-  header h1 { font-size: 18px; font-weight: 600; color: var(--accent); }
-  header .meta { color: var(--muted); font-size: 12px; }
+  header {
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { font-size: 14px; font-weight: 600; color: var(--accent); letter-spacing: -0.01em; }
+  header .meta { color: var(--muted); font-size: 11px; font-family: 'JetBrains Mono', monospace; }
 
-  #filter-bar { background: var(--card); border-bottom: 1px solid var(--border); padding: 10px 24px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .filter-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); white-space: nowrap; }
-  .filter-sep { width: 1px; height: 22px; background: var(--border); flex-shrink: 0; }
-  #model-checkboxes { display: flex; flex-wrap: wrap; gap: 6px; }
-  #other-models-details { margin-left: 4px; }
+  #filter-bar {
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 24px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .filter-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); white-space: nowrap; }
+  .filter-sep { width: 1px; height: 18px; background: var(--border-muted); flex-shrink: 0; }
+  #model-checkboxes { display: flex; flex-wrap: wrap; gap: 5px; }
+  #other-models-details { margin-left: 2px; }
   #other-models-details summary { font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; padding: 3px 0; }
   #other-models-details summary:hover { color: var(--text); }
-  #other-models-wrap { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-  .model-cb-label { display: flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; border: 1px solid var(--border); cursor: pointer; font-size: 12px; color: var(--muted); transition: border-color 0.15s, color 0.15s, background 0.15s; user-select: none; }
+  #other-models-wrap { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+  .model-cb-label {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 10px; border-radius: 20px;
+    border: 1px solid var(--border-muted);
+    cursor: pointer; font-size: 11px; color: var(--muted);
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    user-select: none;
+  }
   .model-cb-label:hover { border-color: var(--accent); color: var(--text); }
-  .model-cb-label.checked { background: rgba(217,119,87,0.12); border-color: var(--accent); color: var(--text); }
+  .model-cb-label.checked { background: rgba(217,119,87,0.1); border-color: var(--accent); color: var(--accent); }
   .model-cb-label input { display: none; }
-  .filter-btn { padding: 3px 10px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; white-space: nowrap; }
+  .filter-btn {
+    padding: 3px 9px; border-radius: 4px;
+    border: 1px solid var(--border-muted);
+    background: transparent; color: var(--muted);
+    font-size: 11px; cursor: pointer; white-space: nowrap;
+    transition: border-color 0.15s, color 0.15s;
+  }
   .filter-btn:hover { border-color: var(--accent); color: var(--text); }
-  .update-btn { padding: 4px 14px; border-radius: 6px; border: 1px solid var(--accent); background: rgba(217,119,87,0.12); color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background 0.15s; }
-  .update-btn:hover { background: rgba(217,119,87,0.22); }
-  .update-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .auto-update-label { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap; }
+  .update-btn {
+    padding: 4px 14px; border-radius: 5px;
+    border: 1px solid rgba(217,119,87,0.5);
+    background: rgba(217,119,87,0.08);
+    color: var(--accent); font-size: 11px; font-weight: 500;
+    cursor: pointer; white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .update-btn:hover { background: rgba(217,119,87,0.16); border-color: var(--accent); }
+  .update-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .auto-update-label {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 11px; color: var(--muted);
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
   .auto-update-label input { accent-color: var(--accent); cursor: pointer; }
-  .range-group { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; flex-shrink: 0; }
-  .range-btn { padding: 4px 13px; background: transparent; border: none; border-right: 1px solid var(--border); color: var(--muted); font-size: 12px; cursor: pointer; transition: background 0.15s, color 0.15s; }
+  .range-group {
+    display: flex;
+    border: 1px solid var(--border-muted);
+    border-radius: 5px; overflow: hidden; flex-shrink: 0;
+  }
+  .range-btn {
+    padding: 3px 12px; background: transparent;
+    border: none; border-right: 1px solid var(--border-muted);
+    color: var(--muted); font-size: 11px; cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
   .range-btn:last-child { border-right: none; }
   .range-btn:hover { background: rgba(255,255,255,0.04); color: var(--text); }
-  .range-btn.active { background: rgba(217,119,87,0.15); color: var(--accent); font-weight: 600; }
+  .range-btn.active { background: rgba(217,119,87,0.12); color: var(--accent); font-weight: 600; }
   .date-inputs { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-  .date-inputs input[type="date"] { background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px; padding: 4px 8px; outline: none; }
+  .date-inputs input[type="date"] {
+    background: var(--bg); border: 1px solid var(--border-muted);
+    border-radius: 4px; color: var(--text); font-size: 11px;
+    padding: 3px 8px; outline: none;
+  }
   .date-inputs input[type="date"]:focus { border-color: var(--accent); }
   .date-inputs span { color: var(--muted); font-size: 11px; }
 
-  .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
-  .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
-  .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
-  .stat-card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
-  .stat-card .value { font-size: 22px; font-weight: 700; }
-  .stat-card .sub { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .container { max-width: 1440px; margin: 0 auto; padding: 18px 24px; }
+  .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 10px; margin-bottom: 18px; }
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--stat-accent, var(--border-muted));
+    border-radius: 7px;
+    padding: 13px 15px;
+  }
+  .stat-card .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 7px; font-weight: 500; }
+  .stat-card .value { font-size: 20px; font-weight: 700; font-family: 'JetBrains Mono', monospace; letter-spacing: -0.02em; }
+  .stat-card .sub { color: var(--muted); font-size: 10px; margin-top: 5px; }
 
-  .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
-  .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+  .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 7px; padding: 16px 18px; }
   .chart-card.wide { grid-column: 1 / -1; }
-  .chart-card h2 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 16px; }
-  .chart-wrap { position: relative; height: 240px; }
-  .chart-wrap.tall { height: 300px; }
+  .chart-card h2 { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 14px; }
+  .chart-wrap { position: relative; height: 220px; }
+  .chart-wrap.tall { height: 270px; }
 
   table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border-bottom: 1px solid var(--border); }
-  td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  thead tr { background: var(--card); }
+  th {
+    text-align: left; padding: 7px 12px;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--muted); border-bottom: 1px solid var(--border-muted);
+    font-weight: 500; white-space: nowrap;
+  }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
   tr:last-child td { border-bottom: none; }
-  tr:hover td { background: rgba(255,255,255,0.02); }
-  .model-tag { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 11px; background: rgba(79,142,247,0.15); color: var(--blue); }
-  .cost { color: var(--green); font-family: monospace; }
-  .cost-na { color: var(--muted); font-family: monospace; font-size: 11px; }
-  .num { font-family: monospace; }
+  tr:hover td { background: rgba(255,255,255,0.018); }
+  .model-tag { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+  .cost { color: var(--green); font-family: 'JetBrains Mono', monospace; }
+  .cost-na { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+  .num { font-family: 'JetBrains Mono', monospace; }
   .muted { color: var(--muted); }
-  .section-title { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
-  .table-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 24px; overflow-x: auto; }
+  .section-title {
+    font-size: 10px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin-bottom: 14px;
+    border-left: 2px solid var(--accent); padding-left: 8px;
+  }
+  .table-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 7px; padding: 16px 18px;
+    margin-bottom: 18px; overflow-x: auto;
+  }
 
-  footer { border-top: 1px solid var(--border); padding: 20px 24px; margin-top: 8px; }
-  .footer-content { max-width: 1400px; margin: 0 auto; }
-  .footer-content p { color: var(--muted); font-size: 12px; line-height: 1.7; margin-bottom: 4px; }
+  footer { border-top: 1px solid var(--border); padding: 14px 24px; margin-top: 4px; }
+  .footer-content { max-width: 1440px; margin: 0 auto; }
+  .footer-content p { color: var(--muted); font-size: 11px; line-height: 1.7; margin-bottom: 3px; }
   .footer-content p:last-child { margin-bottom: 0; }
   .footer-content a { color: var(--blue); text-decoration: none; }
   .footer-content a:hover { text-decoration: underline; }
@@ -368,12 +454,21 @@ function fmtCostBig(c) { return '$' + c.toFixed(2); }
 
 // ── Chart colors ───────────────────────────────────────────────────────────
 const TOKEN_COLORS = {
-  input:          'rgba(79,142,247,0.8)',
-  output:         'rgba(167,139,250,0.8)',
-  cache_read:     'rgba(74,222,128,0.6)',
-  cache_creation: 'rgba(251,191,36,0.6)',
+  input:          'rgba(91,156,246,0.85)',
+  output:         'rgba(167,139,250,0.85)',
+  cache_read:     'rgba(62,207,110,0.7)',
+  cache_creation: 'rgba(245,197,66,0.7)',
 };
-const MODEL_COLORS = ['#d97757','#4f8ef7','#4ade80','#a78bfa','#fbbf24','#f472b6','#34d399','#60a5fa'];
+const MODEL_COLORS = ['#d97757','#5b9cf6','#3ecf6e','#a78bfa','#f5c542','#f472b6','#34d399','#60a5fa'];
+
+// ── Model tag styles by family ─────────────────────────────────────────────
+function getModelTagStyle(model) {
+  const m = (model || '').toLowerCase();
+  if (m.includes('opus'))   return 'background:rgba(217,119,87,0.15);color:#d97757;';
+  if (m.includes('sonnet')) return 'background:rgba(91,156,246,0.15);color:#5b9cf6;';
+  if (m.includes('haiku'))  return 'background:rgba(167,139,250,0.15);color:#a78bfa;';
+  return 'background:rgba(96,113,138,0.15);color:#60718a;';
+}
 
 // ── Time range ─────────────────────────────────────────────────────────────
 const RANGE_LABELS = { '1d': 'Today', '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time', 'custom': 'Custom Range' };
@@ -659,16 +754,16 @@ function applyFilter() {
 function renderStats(t) {
   const rangeLabel = selectedRange === 'custom' ? 'custom range' : RANGE_LABELS[selectedRange].toLowerCase();
   const stats = [
-    { label: 'Sessions',       value: t.sessions.toLocaleString(), sub: rangeLabel },
-    { label: 'Turns',          value: fmt(t.turns),                sub: rangeLabel },
-    { label: 'Input Tokens',   value: fmt(t.input),                sub: rangeLabel },
-    { label: 'Output Tokens',  value: fmt(t.output),               sub: rangeLabel },
-    { label: 'Cache Read',     value: fmt(t.cache_read),           sub: 'from prompt cache' },
-    { label: 'Cache Creation', value: fmt(t.cache_creation),       sub: 'writes to prompt cache' },
-    { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: 'API pricing, Apr 2026', color: '#4ade80' },
+    { label: 'Sessions',       value: t.sessions.toLocaleString(), sub: rangeLabel,              accent: '#5b9cf6' },
+    { label: 'Turns',          value: fmt(t.turns),                sub: rangeLabel,              accent: '#5b9cf6' },
+    { label: 'Input Tokens',   value: fmt(t.input),                sub: rangeLabel,              accent: '#5b9cf6' },
+    { label: 'Output Tokens',  value: fmt(t.output),               sub: rangeLabel,              accent: '#a78bfa' },
+    { label: 'Cache Read',     value: fmt(t.cache_read),           sub: 'from prompt cache',     accent: '#3ecf6e' },
+    { label: 'Cache Creation', value: fmt(t.cache_creation),       sub: 'writes to prompt cache',accent: '#f5c542' },
+    { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: 'API pricing, Apr 2026', accent: '#3ecf6e', color: '#3ecf6e' },
   ];
   document.getElementById('stats-row').innerHTML = stats.map(s => `
-    <div class="stat-card">
+    <div class="stat-card" style="--stat-accent:${s.accent}">
       <div class="label">${s.label}</div>
       <div class="value" style="${s.color ? 'color:' + s.color : ''}">${s.value}</div>
       ${s.sub ? `<div class="sub">${s.sub}</div>` : ''}
@@ -692,10 +787,10 @@ function renderDailyChart(daily) {
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { labels: { color: '#8892a4', boxWidth: 12 } } },
+      plugins: { legend: { labels: { color: '#60718a', boxWidth: 10, font: { size: 11 } } } },
       scales: {
-        x: { ticks: { color: '#8892a4', maxTicksLimit: RANGE_TICKS[selectedRange] }, grid: { color: '#2a2d3a' } },
-        y: { ticks: { color: '#8892a4', callback: v => fmt(v) }, grid: { color: '#2a2d3a' } },
+        x: { ticks: { color: '#60718a', maxTicksLimit: RANGE_TICKS[selectedRange], font: { size: 11 } }, grid: { color: '#1c2030' } },
+        y: { ticks: { color: '#60718a', callback: v => fmt(v), font: { size: 11 } }, grid: { color: '#1c2030' } },
       }
     }
   });
@@ -709,12 +804,12 @@ function renderModelChart(byModel) {
     type: 'doughnut',
     data: {
       labels: byModel.map(m => m.model),
-      datasets: [{ data: byModel.map(m => m.input + m.output), backgroundColor: MODEL_COLORS, borderWidth: 2, borderColor: '#1a1d27' }]
+      datasets: [{ data: byModel.map(m => m.input + m.output), backgroundColor: MODEL_COLORS, borderWidth: 2, borderColor: '#111420' }]
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
-        legend: { position: 'bottom', labels: { color: '#8892a4', boxWidth: 12, font: { size: 11 } } },
+        legend: { position: 'bottom', labels: { color: '#60718a', boxWidth: 10, font: { size: 11 } } },
         tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${fmt(ctx.raw)} tokens` } }
       }
     }
@@ -737,10 +832,10 @@ function renderProjectChart(byProject) {
     },
     options: {
       indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { labels: { color: '#8892a4', boxWidth: 12 } } },
+      plugins: { legend: { labels: { color: '#60718a', boxWidth: 10, font: { size: 11 } } } },
       scales: {
-        x: { ticks: { color: '#8892a4', callback: v => fmt(v) }, grid: { color: '#2a2d3a' } },
-        y: { ticks: { color: '#8892a4', font: { size: 11 } }, grid: { color: '#2a2d3a' } },
+        x: { ticks: { color: '#60718a', callback: v => fmt(v), font: { size: 11 } }, grid: { color: '#1c2030' } },
+        y: { ticks: { color: '#60718a', font: { size: 11 } }, grid: { color: '#1c2030' } },
       }
     }
   });
@@ -753,7 +848,7 @@ function renderSessionsTable(sessions) {
       ? `<td class="cost">${fmtCost(s.cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
     const modelTags = s.models
-      .map(m => `<span class="model-tag">${m}</span>`)
+      .map(m => `<span class="model-tag" style="${getModelTagStyle(m)}">${m}</span>`)
       .join(' ');
     return `<tr>
       <td class="muted" style="font-family:monospace">${s.session_id}&hellip;</td>
@@ -818,7 +913,7 @@ function renderModelCostTable(byModel) {
     }
 
     return `<tr>
-      <td><span class="model-tag">${m.model}</span></td>
+      <td><span class="model-tag" style="${getModelTagStyle(m.model)}">${m.model}</span></td>
       <td class="num">${fmt(m.turns)}${costSub(cost)}</td>
       <td class="num">${fmt(m.input)}${costSub(inputCost)}</td>
       <td class="num">${fmt(m.output)}${costSub(outputCost)}</td>
