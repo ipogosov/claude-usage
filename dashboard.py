@@ -435,47 +435,11 @@ let selectedModels = new Set();
 let selectedRange = '30d';
 let charts = {};
 
-// ── Pricing (Anthropic API, April 2026) ────────────────────────────────────
-// https://docs.anthropic.com/en/docs/about-claude/pricing
-// cache_write uses 1h rate (2x base input) — Claude Code sessions are long-running
-const PRICING = {
-  'claude-opus-4-6':   { input:  5.00, output: 25.00, cache_write: 10.00, cache_read: 0.50 },
-  'claude-opus-4-5':   { input:  5.00, output: 25.00, cache_write: 10.00, cache_read: 0.50 },
-  'claude-sonnet-4-6': { input:  3.00, output: 15.00, cache_write:  6.00, cache_read: 0.30 },
-  'claude-sonnet-4-5': { input:  3.00, output: 15.00, cache_write:  6.00, cache_read: 0.30 },
-  'claude-haiku-4-5':  { input:  1.00, output:  5.00, cache_write:  2.00, cache_read: 0.10 },
-  'claude-haiku-4-6':  { input:  1.00, output:  5.00, cache_write:  2.00, cache_read: 0.10 },
-};
-
+// ── Model classification (no pricing — costs are computed server-side) ────────
 function isBillable(model) {
   if (!model) return false;
   const m = model.toLowerCase();
   return m.includes('opus') || m.includes('sonnet') || m.includes('haiku');
-}
-
-function getPricing(model) {
-  if (!model) return null;
-  if (PRICING[model]) return PRICING[model];
-  for (const key of Object.keys(PRICING)) {
-    if (model.startsWith(key)) return PRICING[key];
-  }
-  const m = model.toLowerCase();
-  if (m.includes('opus'))   return PRICING['claude-opus-4-6'];
-  if (m.includes('sonnet')) return PRICING['claude-sonnet-4-6'];
-  if (m.includes('haiku'))  return PRICING['claude-haiku-4-5'];
-  return null;
-}
-
-function calcCost(model, inp, out, cacheRead, cacheCreation) {
-  if (!isBillable(model)) return 0;
-  const p = getPricing(model);
-  if (!p) return 0;
-  return (
-    inp           * p.input       / 1e6 +
-    out           * p.output      / 1e6 +
-    cacheRead     * p.cache_read  / 1e6 +
-    cacheCreation * p.cache_write / 1e6
-  );
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────────
@@ -576,13 +540,15 @@ function modelPriority(m) {
   return 3;
 }
 
+// allModels here is [{model, billable}] from server
 function readURLModels(allModels) {
   const param = new URLSearchParams(window.location.search).get('models');
-  if (!param) return new Set(allModels.filter(m => isBillable(m)));
+  if (!param) return new Set(allModels.filter(r => r.billable).map(r => r.model));
   const fromURL = new Set(param.split(',').map(s => s.trim()).filter(Boolean));
-  return new Set(allModels.filter(m => fromURL.has(m)));
+  return new Set(allModels.map(r => r.model).filter(m => fromURL.has(m)));
 }
 
+// allModels here is string[] from DOM (cb.value)
 function isDefaultModelSelection(allModels) {
   const billable = allModels.filter(m => isBillable(m));
   if (selectedModels.size !== billable.length) return false;
@@ -590,13 +556,14 @@ function isDefaultModelSelection(allModels) {
 }
 
 function buildFilterUI(allModels) {
+  // allModels is [{model, billable}] from rawData
   const sorted = [...allModels].sort((a, b) => {
-    const pa = modelPriority(a), pb = modelPriority(b);
-    return pa !== pb ? pa - pb : a.localeCompare(b);
+    const pa = modelPriority(a.model), pb = modelPriority(b.model);
+    return pa !== pb ? pa - pb : a.model.localeCompare(b.model);
   });
   selectedModels = readURLModels(allModels);
-  const mainModels = sorted.filter(m => isBillable(m));
-  const otherModels = sorted.filter(m => !isBillable(m));
+  const mainModels  = sorted.filter(r =>  r.billable).map(r => r.model);
+  const otherModels = sorted.filter(r => !r.billable).map(r => r.model);
 
   const dotColor = m => {
     const ml = m.toLowerCase();
@@ -694,16 +661,28 @@ function applyFilter() {
   }
   const daily = Object.values(dailyMap).sort((a, b) => a.day.localeCompare(b.day));
 
-  // By model: aggregate tokens + turns from daily data
+  // By model: aggregate tokens + turns + pre-computed costs from daily data
   const modelMap = {};
   for (const r of filteredDaily) {
-    if (!modelMap[r.model]) modelMap[r.model] = { model: r.model, input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, sessions: 0 };
+    if (!modelMap[r.model]) modelMap[r.model] = {
+      model: r.model, input: 0, output: 0, cache_read: 0, cache_creation: 0,
+      turns: 0, sessions: 0,
+      cost: 0, input_cost: 0, output_cost: 0,
+      cache_read_cost: 0, cache_creation_cost: 0, cache_savings: 0,
+      billable: r.billable,
+    };
     const m = modelMap[r.model];
-    m.input          += r.input;
-    m.output         += r.output;
-    m.cache_read     += r.cache_read;
-    m.cache_creation += r.cache_creation;
-    m.turns          += r.turns;
+    m.input               += r.input;
+    m.output              += r.output;
+    m.cache_read          += r.cache_read;
+    m.cache_creation      += r.cache_creation;
+    m.turns               += r.turns;
+    m.cost                += r.cost;
+    m.input_cost          += r.input_cost;
+    m.output_cost         += r.output_cost;
+    m.cache_read_cost     += r.cache_read_cost;
+    m.cache_creation_cost += r.cache_creation_cost;
+    m.cache_savings       += r.cache_savings;
   }
 
   // Aggregate session_model_daily by session, filtered by model + date range
@@ -711,7 +690,7 @@ function applyFilter() {
   for (const r of rawData.session_model_daily) {
     if (!selectedModels.has(r.model) || !inRange(r.day)) continue;
     if (!smdBySession[r.session_id]) {
-      smdBySession[r.session_id] = { input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, byModel: {} };
+      smdBySession[r.session_id] = { input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, cost: 0, byModel: {} };
     }
     const s = smdBySession[r.session_id];
     s.input          += r.input;
@@ -719,31 +698,30 @@ function applyFilter() {
     s.cache_read     += r.cache_read;
     s.cache_creation += r.cache_creation;
     s.turns          += r.turns;
-    if (!s.byModel[r.model]) s.byModel[r.model] = { input: 0, output: 0, cache_read: 0, cache_creation: 0 };
+    s.cost           += r.cost;
+    if (!s.byModel[r.model]) s.byModel[r.model] = { input: 0, output: 0, cache_read: 0, cache_creation: 0, cost: 0 };
     const m = s.byModel[r.model];
     m.input          += r.input;
     m.output         += r.output;
     m.cache_read     += r.cache_read;
     m.cache_creation += r.cache_creation;
+    m.cost           += r.cost;
   }
 
-  // Join with sessions_all metadata; cost from per-model breakdown
+  // Join with sessions_all metadata; cost already accumulated from enriched smd rows
   const filteredSessions = rawData.sessions_all
     .filter(s => smdBySession[s.session_id])
     .map(s => {
       const agg = smdBySession[s.session_id];
-      const cost = Object.entries(agg.byModel).reduce(
-        (total, [model, t]) => total + calcCost(model, t.input, t.output, t.cache_read, t.cache_creation), 0
-      );
       return {
         ...s,
-        input:         agg.input,
-        output:        agg.output,
-        cache_read:    agg.cache_read,
+        input:          agg.input,
+        output:         agg.output,
+        cache_read:     agg.cache_read,
         cache_creation: agg.cache_creation,
-        turns:         agg.turns,
-        models:        Object.keys(agg.byModel),
-        cost,
+        turns:          agg.turns,
+        models:         Object.keys(agg.byModel),
+        cost:           agg.cost,
       };
     });
 
@@ -774,7 +752,7 @@ function applyFilter() {
     output:         byModel.reduce((s, m) => s + m.output, 0),
     cache_read:     byModel.reduce((s, m) => s + m.cache_read, 0),
     cache_creation: byModel.reduce((s, m) => s + m.cache_creation, 0),
-    cost:           byModel.reduce((s, m) => s + calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation), 0),
+    cost:           byModel.reduce((s, m) => s + m.cost, 0),
   };
 
   // Update daily chart title
@@ -887,7 +865,7 @@ function renderProjectChart(byProject) {
 
 function renderSessionsTable(sessions) {
   document.getElementById('sessions-body').innerHTML = sessions.map(s => {
-    const hasBillable = s.models.some(m => isBillable(m));
+    const hasBillable = s.cost > 0;
     const costCell = hasBillable
       ? `<td class="cost">${fmtCost(s.cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
