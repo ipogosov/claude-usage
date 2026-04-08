@@ -139,18 +139,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #0a0c12;
-    --card: #111420;
-    --card-hover: #161a28;
-    --border: #1c2030;
-    --border-muted: #242838;
-    --text: #dde3ed;
-    --muted: #60718a;
+    --bg: #100e0d;
+    --card: #1b1714;
+    --card-hover: #231f1b;
+    --border: #2e2824;
+    --border-muted: #3a322d;
+    --text: #ece5de;
+    --muted: #7d6f63;
     --accent: #d97757;
-    --blue: #5b9cf6;
-    --green: #3ecf6e;
-    --purple: #a78bfa;
-    --yellow: #f5c542;
+    --blue: #60a5fa;
+    --green: #4ade80;
+    --yellow: #fcd34d;
+    --red: #f87171;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -258,7 +258,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .stat-card {
     background: var(--card);
     border: 1px solid var(--border);
-    border-left: 3px solid var(--stat-accent, var(--border-muted));
     border-radius: 7px;
     padding: 13px 15px;
   }
@@ -461,20 +460,20 @@ function fmtCostBig(c) { return '$' + c.toFixed(2); }
 
 // ── Chart colors ───────────────────────────────────────────────────────────
 const TOKEN_COLORS = {
-  input:          'rgba(91,156,246,0.85)',
-  output:         'rgba(167,139,250,0.85)',
-  cache_read:     'rgba(62,207,110,0.7)',
-  cache_creation: 'rgba(245,197,66,0.7)',
+  input:          'rgba(96,165,250,0.85)',
+  output:         'rgba(251,146,60,0.85)',
+  cache_read:     'rgba(74,222,128,0.75)',
+  cache_creation: 'rgba(252,211,77,0.75)',
 };
-const MODEL_COLORS = ['#d97757','#5b9cf6','#3ecf6e','#a78bfa','#f5c542','#f472b6','#34d399','#60a5fa'];
+const MODEL_COLORS = ['#d97757','#60a5fa','#4ade80','#fcd34d','#fb923c','#34d399','#38bdf8','#a3e635'];
 
 // ── Model tag styles by family ─────────────────────────────────────────────
 function getModelTagStyle(model) {
   const m = (model || '').toLowerCase();
   if (m.includes('opus'))   return 'background:rgba(217,119,87,0.15);color:#d97757;';
-  if (m.includes('sonnet')) return 'background:rgba(91,156,246,0.15);color:#5b9cf6;';
-  if (m.includes('haiku'))  return 'background:rgba(167,139,250,0.15);color:#a78bfa;';
-  return 'background:rgba(96,113,138,0.15);color:#60718a;';
+  if (m.includes('sonnet')) return 'background:rgba(96,165,250,0.15);color:#60a5fa;';
+  if (m.includes('haiku'))  return 'background:rgba(74,222,128,0.12);color:#4ade80;';
+  return 'background:rgba(125,111,99,0.15);color:#7d6f63;';
 }
 
 // ── Time range ─────────────────────────────────────────────────────────────
@@ -572,9 +571,9 @@ function buildFilterUI(allModels) {
   const dotColor = m => {
     const ml = m.toLowerCase();
     if (ml.includes('opus'))   return '#d97757';
-    if (ml.includes('sonnet')) return '#5b9cf6';
-    if (ml.includes('haiku'))  return '#a78bfa';
-    return '#60718a';
+    if (ml.includes('sonnet')) return '#60a5fa';
+    if (ml.includes('haiku'))  return '#4ade80';
+    return '#7d6f63';
   };
   const makeCb = m => {
     const checked = selectedModels.has(m);
@@ -769,16 +768,16 @@ function applyFilter() {
 function renderStats(t) {
   const rangeLabel = selectedRange === 'custom' ? 'custom range' : RANGE_LABELS[selectedRange].toLowerCase();
   const stats = [
-    { label: 'Sessions',       value: t.sessions.toLocaleString(), sub: rangeLabel,              accent: '#5b9cf6' },
-    { label: 'Turns',          value: fmt(t.turns),                sub: rangeLabel,              accent: '#5b9cf6' },
-    { label: 'Input Tokens',   value: fmt(t.input),                sub: rangeLabel,              accent: '#5b9cf6' },
-    { label: 'Output Tokens',  value: fmt(t.output),               sub: rangeLabel,              accent: '#a78bfa' },
-    { label: 'Cache Read',     value: fmt(t.cache_read),           sub: 'from prompt cache',     accent: '#3ecf6e' },
-    { label: 'Cache Creation', value: fmt(t.cache_creation),       sub: 'writes to prompt cache',accent: '#f5c542' },
-    { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: 'API pricing, Apr 2026', accent: '#3ecf6e', color: '#3ecf6e' },
+    { label: 'Sessions',       value: t.sessions.toLocaleString(), sub: rangeLabel },
+    { label: 'Turns',          value: fmt(t.turns),                sub: rangeLabel },
+    { label: 'Input Tokens',   value: fmt(t.input),                sub: rangeLabel },
+    { label: 'Output Tokens',  value: fmt(t.output),               sub: rangeLabel },
+    { label: 'Cache Read',     value: fmt(t.cache_read),           sub: 'from prompt cache' },
+    { label: 'Cache Creation', value: fmt(t.cache_creation),       sub: 'writes to prompt cache' },
+    { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: 'API pricing, Apr 2026', color: '#4ade80' },
   ];
   document.getElementById('stats-row').innerHTML = stats.map(s => `
-    <div class="stat-card" style="--stat-accent:${s.accent}">
+    <div class="stat-card">
       <div class="label">${s.label}</div>
       <div class="value" style="${s.color ? 'color:' + s.color : ''}">${s.value}</div>
       ${s.sub ? `<div class="sub">${s.sub}</div>` : ''}
@@ -802,10 +801,10 @@ function renderDailyChart(daily) {
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { labels: { color: '#60718a', boxWidth: 10, font: { size: 11 } } } },
+      plugins: { legend: { labels: { color: '#7d6f63', boxWidth: 10, font: { size: 11 } } } },
       scales: {
-        x: { ticks: { color: '#60718a', maxTicksLimit: RANGE_TICKS[selectedRange], font: { size: 11 } }, grid: { color: '#1c2030' } },
-        y: { ticks: { color: '#60718a', callback: v => fmt(v), font: { size: 11 } }, grid: { color: '#1c2030' } },
+        x: { ticks: { color: '#7d6f63', maxTicksLimit: RANGE_TICKS[selectedRange], font: { size: 11 } }, grid: { color: '#2e2824' } },
+        y: { ticks: { color: '#7d6f63', callback: v => fmt(v), font: { size: 11 } }, grid: { color: '#2e2824' } },
       }
     }
   });
@@ -819,12 +818,12 @@ function renderModelChart(byModel) {
     type: 'doughnut',
     data: {
       labels: byModel.map(m => m.model),
-      datasets: [{ data: byModel.map(m => m.input + m.output), backgroundColor: MODEL_COLORS, borderWidth: 2, borderColor: '#111420' }]
+      datasets: [{ data: byModel.map(m => m.input + m.output), backgroundColor: MODEL_COLORS, borderWidth: 2, borderColor: '#1b1714' }]
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
-        legend: { position: 'bottom', labels: { color: '#60718a', boxWidth: 10, font: { size: 11 } } },
+        legend: { position: 'bottom', labels: { color: '#7d6f63', boxWidth: 10, font: { size: 11 } } },
         tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${fmt(ctx.raw)} tokens` } }
       }
     }
@@ -847,10 +846,10 @@ function renderProjectChart(byProject) {
     },
     options: {
       indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { labels: { color: '#60718a', boxWidth: 10, font: { size: 11 } } } },
+      plugins: { legend: { labels: { color: '#7d6f63', boxWidth: 10, font: { size: 11 } } } },
       scales: {
-        x: { ticks: { color: '#60718a', callback: v => fmt(v), font: { size: 11 } }, grid: { color: '#1c2030' } },
-        y: { ticks: { color: '#60718a', font: { size: 11 } }, grid: { color: '#1c2030' } },
+        x: { ticks: { color: '#7d6f63', callback: v => fmt(v), font: { size: 11 } }, grid: { color: '#2e2824' } },
+        y: { ticks: { color: '#7d6f63', font: { size: 11 } }, grid: { color: '#2e2824' } },
       }
     }
   });
