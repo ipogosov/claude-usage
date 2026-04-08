@@ -89,13 +89,41 @@ def get_dashboard_data(db_path=DB_PATH, tz_offset=0):
             "cache_creation": r["total_cache_creation"] or 0,
         })
 
+    # ── Per-session per-model per-day token breakdown ─────────────────────────
+    smd_rows = conn.execute(f"""
+        SELECT
+            session_id,
+            COALESCE(model, 'unknown') as model,
+            {local_day}                as day,
+            SUM(input_tokens)          as input,
+            SUM(output_tokens)         as output,
+            SUM(cache_read_tokens)     as cache_read,
+            SUM(cache_creation_tokens) as cache_creation,
+            COUNT(*)                   as turns
+        FROM turns
+        GROUP BY session_id, model, day
+        ORDER BY session_id, day
+    """).fetchall()
+
+    session_model_daily = [{
+        "session_id": r["session_id"][:8],
+        "model":      r["model"],
+        "day":        r["day"],
+        "input":      r["input"] or 0,
+        "output":     r["output"] or 0,
+        "cache_read": r["cache_read"] or 0,
+        "cache_creation": r["cache_creation"] or 0,
+        "turns":      r["turns"] or 0,
+    } for r in smd_rows]
+
     conn.close()
 
     return {
-        "all_models":     all_models,
-        "daily_by_model": daily_by_model,
-        "sessions_all":   sessions_all,
-        "generated_at":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "all_models":          all_models,
+        "daily_by_model":      daily_by_model,
+        "sessions_all":        sessions_all,
+        "session_model_daily": session_model_daily,
+        "generated_at":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
