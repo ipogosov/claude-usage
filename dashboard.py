@@ -8,6 +8,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from datetime import datetime
 
+from pricing import calc_cost_breakdown, is_billable
+
 DB_PATH = Path.home() / ".claude" / "usage.db"
 
 
@@ -30,7 +32,10 @@ def get_dashboard_data(db_path=DB_PATH, tz_offset=0):
         GROUP BY model
         ORDER BY SUM(input_tokens + output_tokens) DESC
     """).fetchall()
-    all_models = [r["model"] for r in model_rows]
+    all_models = [
+        {"model": r["model"], "billable": is_billable(r["model"])}
+        for r in model_rows
+    ]
 
     # ── Daily per-model, ALL history (client filters by range) ────────────────
     daily_rows = conn.execute(f"""
@@ -47,15 +52,29 @@ def get_dashboard_data(db_path=DB_PATH, tz_offset=0):
         ORDER BY day, model
     """).fetchall()
 
-    daily_by_model = [{
-        "day":            r["day"],
-        "model":          r["model"],
-        "input":          r["input"] or 0,
-        "output":         r["output"] or 0,
-        "cache_read":     r["cache_read"] or 0,
-        "cache_creation": r["cache_creation"] or 0,
-        "turns":          r["turns"] or 0,
-    } for r in daily_rows]
+    daily_by_model = []
+    for r in daily_rows:
+        inp = r["input"]          or 0
+        out = r["output"]         or 0
+        cr  = r["cache_read"]     or 0
+        cc  = r["cache_creation"] or 0
+        bd  = calc_cost_breakdown(r["model"], inp, out, cr, cc)
+        daily_by_model.append({
+            "day":                 r["day"],
+            "model":               r["model"],
+            "input":               inp,
+            "output":              out,
+            "cache_read":          cr,
+            "cache_creation":      cc,
+            "turns":               r["turns"] or 0,
+            "billable":            bd["billable"],
+            "input_cost":          bd["input_cost"],
+            "output_cost":         bd["output_cost"],
+            "cache_read_cost":     bd["cache_read_cost"],
+            "cache_creation_cost": bd["cache_creation_cost"],
+            "cache_savings":       bd["cache_savings"],
+            "cost":                bd["cost"],
+        })
 
     # ── All sessions (client filters by range and model) ──────────────────────
     session_rows = conn.execute("""
@@ -76,17 +95,13 @@ def get_dashboard_data(db_path=DB_PATH, tz_offset=0):
         except Exception:
             duration_min = 0
         sessions_all.append({
-            "session_id":    r["session_id"][:8],
-            "project":       r["project_name"] or "unknown",
-            "last":          (r["last_timestamp"] or "")[:16].replace("T", " "),
-            "last_date":     (r["last_timestamp"] or "")[:10],
-            "duration_min":  duration_min,
-            "model":         r["model"] or "unknown",
-            "turns":         r["turn_count"] or 0,
-            "input":         r["total_input_tokens"] or 0,
-            "output":        r["total_output_tokens"] or 0,
-            "cache_read":    r["total_cache_read"] or 0,
-            "cache_creation": r["total_cache_creation"] or 0,
+            "session_id":   r["session_id"][:8],
+            "project":      r["project_name"] or "unknown",
+            "last":         (r["last_timestamp"] or "")[:16].replace("T", " "),
+            "last_date":    (r["last_timestamp"] or "")[:10],
+            "duration_min": duration_min,
+            "model":        r["model"] or "unknown",
+            "turns":        r["turn_count"] or 0,
         })
 
     # ── Per-session per-model per-day token breakdown ─────────────────────────
@@ -105,16 +120,30 @@ def get_dashboard_data(db_path=DB_PATH, tz_offset=0):
         ORDER BY session_id, day
     """).fetchall()
 
-    session_model_daily = [{
-        "session_id": r["session_id"][:8],
-        "model":      r["model"],
-        "day":        r["day"],
-        "input":      r["input"] or 0,
-        "output":     r["output"] or 0,
-        "cache_read": r["cache_read"] or 0,
-        "cache_creation": r["cache_creation"] or 0,
-        "turns":      r["turns"] or 0,
-    } for r in smd_rows]
+    session_model_daily = []
+    for r in smd_rows:
+        inp = r["input"]          or 0
+        out = r["output"]         or 0
+        cr  = r["cache_read"]     or 0
+        cc  = r["cache_creation"] or 0
+        bd  = calc_cost_breakdown(r["model"], inp, out, cr, cc)
+        session_model_daily.append({
+            "session_id":          r["session_id"][:8],
+            "model":               r["model"],
+            "day":                 r["day"],
+            "input":               inp,
+            "output":              out,
+            "cache_read":          cr,
+            "cache_creation":      cc,
+            "turns":               r["turns"] or 0,
+            "billable":            bd["billable"],
+            "input_cost":          bd["input_cost"],
+            "output_cost":         bd["output_cost"],
+            "cache_read_cost":     bd["cache_read_cost"],
+            "cache_creation_cost": bd["cache_creation_cost"],
+            "cache_savings":       bd["cache_savings"],
+            "cost":                bd["cost"],
+        })
 
     conn.close()
 
@@ -367,7 +396,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <table>
       <thead><tr>
         <th>Session</th><th>Project</th><th>Last Active</th><th>Duration</th>
-        <th>Model</th><th>Turns</th><th>Input</th><th>Output</th><th>Est. Cost</th>
+        <th>Model</th><th>Turns</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Est. Cost</th>
       </tr></thead>
       <tbody id="sessions-body"></tbody>
     </table>
@@ -407,13 +436,15 @@ let selectedRange = '30d';
 let charts = {};
 
 // ── Pricing (Anthropic API, April 2026) ────────────────────────────────────
+// https://docs.anthropic.com/en/docs/about-claude/pricing
+// cache_write uses 1h rate (2x base input) — Claude Code sessions are long-running
 const PRICING = {
-  'claude-opus-4-6':   { input: 6.15,  output: 30.75, cache_write: 7.69, cache_read: 0.61 },
-  'claude-opus-4-5':   { input: 6.15,  output: 30.75, cache_write: 7.69, cache_read: 0.61 },
-  'claude-sonnet-4-6': { input: 3.69,  output: 18.45, cache_write: 4.61, cache_read: 0.37 },
-  'claude-sonnet-4-5': { input: 3.69,  output: 18.45, cache_write: 4.61, cache_read: 0.37 },
-  'claude-haiku-4-5':  { input: 1.23,  output:  6.15, cache_write: 1.54, cache_read: 0.12 },
-  'claude-haiku-4-6':  { input: 1.23,  output:  6.15, cache_write: 1.54, cache_read: 0.12 },
+  'claude-opus-4-6':   { input:  5.00, output: 25.00, cache_write: 10.00, cache_read: 0.50 },
+  'claude-opus-4-5':   { input:  5.00, output: 25.00, cache_write: 10.00, cache_read: 0.50 },
+  'claude-sonnet-4-6': { input:  3.00, output: 15.00, cache_write:  6.00, cache_read: 0.30 },
+  'claude-sonnet-4-5': { input:  3.00, output: 15.00, cache_write:  6.00, cache_read: 0.30 },
+  'claude-haiku-4-5':  { input:  1.00, output:  5.00, cache_write:  2.00, cache_read: 0.10 },
+  'claude-haiku-4-6':  { input:  1.00, output:  5.00, cache_write:  2.00, cache_read: 0.10 },
 };
 
 function isBillable(model) {
@@ -872,6 +903,8 @@ function renderSessionsTable(sessions) {
       <td class="num">${fmt(s.turns)}</td>
       <td class="num">${fmt(s.input)}</td>
       <td class="num">${fmt(s.output)}</td>
+      <td class="num muted">${fmt(s.cache_read)}</td>
+      <td class="num muted">${fmt(s.cache_creation)}</td>
       ${costCell}
     </tr>`;
   }).join('');
