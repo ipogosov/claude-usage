@@ -368,6 +368,17 @@ const MODEL_COLORS = ['#d97757','#4f8ef7','#4ade80','#a78bfa','#fbbf24','#f472b6
 const RANGE_LABELS = { '1d': 'Today', '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time', 'custom': 'Custom Range' };
 const RANGE_TICKS  = { '1d': 1, '7d': 7, '30d': 15, '90d': 13, 'all': 12, 'custom': 15 };
 
+// ── Timezone helpers ────────────────────────────────────────────────────────
+// Returns YYYY-MM-DD string in browser local time
+function getLocalDate(date) {
+  return date.toLocaleDateString('sv'); // 'sv' locale gives ISO format YYYY-MM-DD
+}
+
+// Offset to pass to backend: minutes east of UTC (opposite of JS getTimezoneOffset)
+function getTzOffset() {
+  return -new Date().getTimezoneOffset(); // JS returns minutes WEST, we want EAST
+}
+
 function getRangeCutoff(range) {
   if (range === 'all') return { from: null, to: null };
   if (range === 'custom') {
@@ -378,7 +389,7 @@ function getRangeCutoff(range) {
   const days = range === '1d' ? 0 : range === '7d' ? 7 : range === '30d' ? 30 : 90;
   const d = new Date();
   d.setDate(d.getDate() - days);
-  return { from: d.toISOString().slice(0, 10), to: null };
+  return { from: getLocalDate(d), to: null };
 }
 
 function readURLRange() {
@@ -770,7 +781,7 @@ function renderModelCostTable(byModel) {
 // ── Data loading ───────────────────────────────────────────────────────────
 async function loadData() {
   try {
-    const resp = await fetch('/api/data');
+    const resp = await fetch('/api/data?tz=' + getTzOffset());
     const d = await resp.json();
     if (d.error) {
       document.body.innerHTML = '<div style="padding:40px;color:#f87171">' + d.error + '</div>';
