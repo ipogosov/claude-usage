@@ -556,14 +556,52 @@ function applyFilter() {
     m.turns          += r.turns;
   }
 
-  // Filter sessions by model + date range
-  const filteredSessions = rawData.sessions_all.filter(s =>
-    selectedModels.has(s.model) && inRange(s.last_date)
-  );
+  // Aggregate session_model_daily by session, filtered by model + date range
+  const smdBySession = {};
+  for (const r of rawData.session_model_daily) {
+    if (!selectedModels.has(r.model) || !inRange(r.day)) continue;
+    if (!smdBySession[r.session_id]) {
+      smdBySession[r.session_id] = { input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, byModel: {} };
+    }
+    const s = smdBySession[r.session_id];
+    s.input          += r.input;
+    s.output         += r.output;
+    s.cache_read     += r.cache_read;
+    s.cache_creation += r.cache_creation;
+    s.turns          += r.turns;
+    if (!s.byModel[r.model]) s.byModel[r.model] = { input: 0, output: 0, cache_read: 0, cache_creation: 0 };
+    const m = s.byModel[r.model];
+    m.input          += r.input;
+    m.output         += r.output;
+    m.cache_read     += r.cache_read;
+    m.cache_creation += r.cache_creation;
+  }
+
+  // Join with sessions_all metadata; cost from per-model breakdown
+  const filteredSessions = rawData.sessions_all
+    .filter(s => smdBySession[s.session_id])
+    .map(s => {
+      const agg = smdBySession[s.session_id];
+      const cost = Object.entries(agg.byModel).reduce(
+        (total, [model, t]) => total + calcCost(model, t.input, t.output, t.cache_read, t.cache_creation), 0
+      );
+      return {
+        ...s,
+        input:         agg.input,
+        output:        agg.output,
+        cache_read:    agg.cache_read,
+        cache_creation: agg.cache_creation,
+        turns:         agg.turns,
+        models:        Object.keys(agg.byModel),
+        cost,
+      };
+    });
 
   // Add session counts into modelMap
   for (const s of filteredSessions) {
-    if (modelMap[s.model]) modelMap[s.model].sessions++;
+    for (const model of s.models) {
+      if (modelMap[model]) modelMap[model].sessions++;
+    }
   }
 
   const byModel = Object.values(modelMap).sort((a, b) => (b.input + b.output) - (a.input + a.output));
