@@ -189,15 +189,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #other-models-details summary:hover { color: var(--text); }
   #other-models-wrap { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
   .model-cb-label {
-    display: flex; align-items: center; gap: 5px;
-    padding: 3px 10px; border-radius: 20px;
-    border: 1px solid var(--border-muted);
-    cursor: pointer; font-size: 11px; color: var(--muted);
-    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 8px; border-radius: 3px;
+    cursor: pointer; font-size: 12px; color: var(--muted);
+    transition: color 0.12s, background 0.12s;
     user-select: none;
   }
-  .model-cb-label:hover { border-color: var(--accent); color: var(--text); }
-  .model-cb-label.checked { background: rgba(217,119,87,0.1); border-color: var(--accent); color: var(--accent); }
+  .model-cb-label .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--border-muted); flex-shrink: 0;
+    transition: background 0.12s, opacity 0.12s;
+    opacity: 0.5;
+  }
+  .model-cb-label:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+  .model-cb-label:hover .dot { opacity: 0.8; }
+  .model-cb-label.checked { color: var(--text); }
+  .model-cb-label.checked .dot { opacity: 1; }
   .model-cb-label input { display: none; }
   .filter-btn {
     padding: 3px 9px; border-radius: 4px;
@@ -562,11 +569,19 @@ function buildFilterUI(allModels) {
   const mainModels = sorted.filter(m => isBillable(m));
   const otherModels = sorted.filter(m => !isBillable(m));
 
+  const dotColor = m => {
+    const ml = m.toLowerCase();
+    if (ml.includes('opus'))   return '#d97757';
+    if (ml.includes('sonnet')) return '#5b9cf6';
+    if (ml.includes('haiku'))  return '#a78bfa';
+    return '#60718a';
+  };
   const makeCb = m => {
     const checked = selectedModels.has(m);
+    const dc = dotColor(m);
     return `<label class="model-cb-label ${checked ? 'checked' : ''}" data-model="${m}">
       <input type="checkbox" value="${m}" ${checked ? 'checked' : ''} onchange="onModelToggle(this)">
-      ${m}
+      <span class="dot" style="background:${dc}"></span>${m}
     </label>`;
   };
 
@@ -990,6 +1005,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(HTML_TEMPLATE.encode("utf-8"))
 
