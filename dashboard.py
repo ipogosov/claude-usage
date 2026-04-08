@@ -140,8 +140,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <style>
   :root {
     --bg: #100e0d;
-    --card: #1b1714;
-    --card-hover: #231f1b;
+    --card: #211d18;
+    --card-hover: #2a2520;
     --border: #2e2824;
     --border-muted: #3a322d;
     --text: #ece5de;
@@ -208,12 +208,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .model-cb-label input { display: none; }
   .filter-btn {
     padding: 3px 9px; border-radius: 4px;
-    border: 1px solid var(--border-muted);
+    border: none;
     background: transparent; color: var(--muted);
     font-size: 11px; cursor: pointer; white-space: nowrap;
-    transition: border-color 0.15s, color 0.15s;
+    transition: background 0.12s, color 0.12s;
   }
-  .filter-btn:hover { border-color: var(--accent); color: var(--text); }
+  .filter-btn:hover { background: rgba(255,255,255,0.06); color: var(--text); }
   .update-btn {
     padding: 4px 14px; border-radius: 5px;
     border: 1px solid rgba(217,119,87,0.5);
@@ -232,12 +232,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .auto-update-label input { accent-color: var(--accent); cursor: pointer; }
   .range-group {
     display: flex;
-    border: 1px solid var(--border-muted);
+    background: rgba(255,255,255,0.04);
     border-radius: 5px; overflow: hidden; flex-shrink: 0;
   }
   .range-btn {
     padding: 3px 12px; background: transparent;
-    border: none; border-right: 1px solid var(--border-muted);
+    border: none; border-right: 1px solid var(--border);
     color: var(--muted); font-size: 11px; cursor: pointer;
     transition: background 0.15s, color 0.15s;
   }
@@ -246,18 +246,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .range-btn.active { background: rgba(217,119,87,0.12); color: var(--accent); font-weight: 600; }
   .date-inputs { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
   .date-inputs input[type="date"] {
-    background: var(--bg); border: 1px solid var(--border-muted);
+    background: rgba(255,255,255,0.05); border: none;
     border-radius: 4px; color: var(--text); font-size: 11px;
     padding: 3px 8px; outline: none;
   }
-  .date-inputs input[type="date"]:focus { border-color: var(--accent); }
+  .date-inputs input[type="date"]:focus { box-shadow: 0 0 0 1px var(--accent); }
   .date-inputs span { color: var(--muted); font-size: 11px; }
 
   .container { max-width: 1440px; margin: 0 auto; padding: 18px 24px; }
   .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 10px; margin-bottom: 18px; }
   .stat-card {
     background: var(--card);
-    border: 1px solid var(--border);
     border-radius: 7px;
     padding: 13px 15px;
   }
@@ -266,7 +265,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .stat-card .sub { color: var(--muted); font-size: 10px; margin-top: 5px; }
 
   .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
-  .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 7px; padding: 16px 18px; }
+  .chart-card { background: var(--card); border-radius: 7px; padding: 16px 18px; }
   .chart-card.wide { grid-column: 1 / -1; }
   .chart-card h2 { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 14px; }
   .chart-wrap { position: relative; height: 220px; }
@@ -295,7 +294,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     border-left: 2px solid var(--accent); padding-left: 8px;
   }
   .table-card {
-    background: var(--card); border: 1px solid var(--border);
+    background: var(--card);
     border-radius: 7px; padding: 16px 18px;
     margin-bottom: 18px; overflow-x: auto;
   }
@@ -818,7 +817,7 @@ function renderModelChart(byModel) {
     type: 'doughnut',
     data: {
       labels: byModel.map(m => m.model),
-      datasets: [{ data: byModel.map(m => m.input + m.output), backgroundColor: MODEL_COLORS, borderWidth: 2, borderColor: '#1b1714' }]
+      datasets: [{ data: byModel.map(m => m.input + m.output), backgroundColor: MODEL_COLORS, borderWidth: 2, borderColor: '#211d18' }]
     },
     options: {
       responsive: true, maintainAspectRatio: false,
