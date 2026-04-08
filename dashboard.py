@@ -816,8 +816,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(HTML_TEMPLATE.encode("utf-8"))
 
-        elif self.path == "/api/data":
-            data = get_dashboard_data()
+        elif self.path.startswith("/api/data"):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                tz_offset = int(qs.get('tz', ['0'])[0])
+                tz_offset = max(-840, min(840, tz_offset))  # clamp to valid range
+            except (ValueError, IndexError):
+                tz_offset = 0
+            data = get_dashboard_data(tz_offset=tz_offset)
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
