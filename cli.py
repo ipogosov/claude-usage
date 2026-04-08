@@ -13,38 +13,13 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime, date
 
+from pricing import calc_cost
+
 DB_PATH = Path.home() / ".claude" / "usage.db"
 
-PRICING = {
-    "claude-opus-4-6":   {"input": 15.00, "output": 75.00},
-    "claude-opus-4-5":   {"input": 15.00, "output": 75.00},
-    "claude-sonnet-4-6": {"input":  3.00, "output": 15.00},
-    "claude-sonnet-4-5": {"input":  3.00, "output": 15.00},
-    "claude-haiku-4-5":  {"input":  0.80, "output":  4.00},
-    "claude-haiku-4-6":  {"input":  0.80, "output":  4.00},
-    "default":           {"input":  3.00, "output": 15.00},
-}
-
-def get_pricing(model):
-    if not model:
-        return PRICING["default"]
-    if model in PRICING:
-        return PRICING[model]
-    for key in PRICING:
-        if key != "default" and model.startswith(key):
-            return PRICING[key]
-    return PRICING["default"]
-
-def calc_cost(model, inp, out, cache_read, cache_creation):
-    p = get_pricing(model)
-    return (
-        inp          * p["input"]  / 1_000_000 +
-        out          * p["output"] / 1_000_000 +
-        cache_read   * p["input"]  * 0.10 / 1_000_000 +
-        cache_creation * p["input"] * 1.25 / 1_000_000
-    )
-
 def fmt(n):
+    if n >= 1_000_000_000:
+        return f"{n/1_000_000_000:.2f}B"
     if n >= 1_000_000:
         return f"{n/1_000_000:.2f}M"
     if n >= 1_000:
@@ -70,6 +45,11 @@ def cmd_scan():
     from scanner import scan, PROJECTS_DIR
     print(f"Scanning {PROJECTS_DIR} ...")
     scan()
+
+
+def cmd_reconcile():
+    from scanner import reconcile_sessions
+    reconcile_sessions()
 
 
 def cmd_today():
@@ -135,45 +115,49 @@ def cmd_stats():
     conn = require_db()
     conn.row_factory = sqlite3.Row
 
-    # All-time totals
-    totals = conn.execute("""
+    # Token totals from turns (accurate even when models switch mid-session)
+    token_totals = conn.execute("""
         SELECT
-            SUM(total_input_tokens)   as inp,
-            SUM(total_output_tokens)  as out,
-            SUM(total_cache_read)     as cr,
-            SUM(total_cache_creation) as cc,
-            SUM(turn_count)           as turns,
-            COUNT(*)                  as sessions,
-            MIN(first_timestamp)      as first,
-            MAX(last_timestamp)       as last
+            SUM(input_tokens)          as inp,
+            SUM(output_tokens)         as out,
+            SUM(cache_read_tokens)     as cr,
+            SUM(cache_creation_tokens) as cc,
+            COUNT(*)                   as turns
+        FROM turns
+    """).fetchone()
+
+    # Session count and period from sessions table
+    session_meta = conn.execute("""
+        SELECT COUNT(*) as sessions, MIN(first_timestamp) as first, MAX(last_timestamp) as last
         FROM sessions
     """).fetchone()
 
-    # By model
+    # By model from turns — each turn is priced at the model it actually used
     by_model = conn.execute("""
         SELECT
-            COALESCE(model, 'unknown') as model,
-            SUM(total_input_tokens)    as inp,
-            SUM(total_output_tokens)   as out,
-            SUM(total_cache_read)      as cr,
-            SUM(total_cache_creation)  as cc,
-            SUM(turn_count)            as turns,
-            COUNT(*)                   as sessions
-        FROM sessions
+            COALESCE(model, 'unknown')  as model,
+            SUM(input_tokens)           as inp,
+            SUM(output_tokens)          as out,
+            SUM(cache_read_tokens)      as cr,
+            SUM(cache_creation_tokens)  as cc,
+            COUNT(*)                    as turns,
+            COUNT(DISTINCT session_id)  as sessions
+        FROM turns
         GROUP BY model
         ORDER BY inp + out DESC
     """).fetchall()
 
-    # Top 5 projects
+    # Top 5 projects — join to get accurate per-project token counts
     top_projects = conn.execute("""
         SELECT
-            project_name,
-            SUM(total_input_tokens)  as inp,
-            SUM(total_output_tokens) as out,
-            SUM(turn_count)          as turns,
-            COUNT(*)                 as sessions
-        FROM sessions
-        GROUP BY project_name
+            s.project_name,
+            SUM(t.input_tokens)          as inp,
+            SUM(t.output_tokens)         as out,
+            COUNT(t.id)                  as turns,
+            COUNT(DISTINCT s.session_id) as sessions
+        FROM sessions s
+        JOIN turns t ON t.session_id = s.session_id
+        GROUP BY s.project_name
         ORDER BY inp + out DESC
         LIMIT 5
     """).fetchall()
@@ -182,14 +166,12 @@ def cmd_stats():
     daily_avg = conn.execute("""
         SELECT
             AVG(daily_inp) as avg_inp,
-            AVG(daily_out) as avg_out,
-            AVG(daily_cost) as avg_cost
+            AVG(daily_out) as avg_out
         FROM (
             SELECT
                 substr(timestamp, 1, 10) as day,
-                SUM(input_tokens) as daily_inp,
-                SUM(output_tokens) as daily_out,
-                0.0 as daily_cost
+                SUM(input_tokens)  as daily_inp,
+                SUM(output_tokens) as daily_out
             FROM turns
             WHERE timestamp >= datetime('now', '-30 days')
             GROUP BY day
@@ -207,16 +189,16 @@ def cmd_stats():
     print("  Claude Code Usage - All-Time Statistics")
     hr("=")
 
-    first_date = (totals["first"] or "")[:10]
-    last_date = (totals["last"] or "")[:10]
+    first_date = (session_meta["first"] or "")[:10]
+    last_date  = (session_meta["last"]  or "")[:10]
     print(f"  Period:           {first_date} to {last_date}")
-    print(f"  Total sessions:   {totals['sessions'] or 0:,}")
-    print(f"  Total turns:      {fmt(totals['turns'] or 0)}")
+    print(f"  Total sessions:   {session_meta['sessions'] or 0:,}")
+    print(f"  Total turns:      {fmt(token_totals['turns'] or 0)}")
     print()
-    print(f"  Input tokens:     {fmt(totals['inp'] or 0):<12}  (raw prompt tokens)")
-    print(f"  Output tokens:    {fmt(totals['out'] or 0):<12}  (generated tokens)")
-    print(f"  Cache read:       {fmt(totals['cr'] or 0):<12}  (90% cheaper than input)")
-    print(f"  Cache creation:   {fmt(totals['cc'] or 0):<12}  (25% premium on input)")
+    print(f"  Input tokens:     {fmt(token_totals['inp'] or 0):<12}  (non-cached prompt tokens)")
+    print(f"  Output tokens:    {fmt(token_totals['out'] or 0):<12}  (generated tokens)")
+    print(f"  Cache read:       {fmt(token_totals['cr'] or 0):<12}  (0.10x input price)")
+    print(f"  Cache creation:   {fmt(token_totals['cc'] or 0):<12}  (2.00x input price, 1h cache)")
     print()
     print(f"  Est. total cost:  ${total_cost:.4f}")
     hr()
@@ -257,11 +239,11 @@ def cmd_dashboard():
 
     def open_browser():
         time.sleep(1.0)
-        webbrowser.open("http://localhost:8080")
+        webbrowser.open("http://localhost:8087")
 
     t = threading.Thread(target=open_browser, daemon=True)
     t.start()
-    serve(port=8080)
+    serve(port=8087)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -270,14 +252,16 @@ USAGE = """
 Claude Code Usage Dashboard
 
 Usage:
-  python cli.py scan       Scan JSONL files and update database
-  python cli.py today      Show today's usage summary
-  python cli.py stats      Show all-time statistics
-  python cli.py dashboard  Scan + start dashboard at http://localhost:8080
+  python cli.py scan        Scan JSONL files and update database
+  python cli.py reconcile   Recompute session totals from turns table
+  python cli.py today       Show today's usage summary
+  python cli.py stats       Show all-time statistics
+  python cli.py dashboard   Scan + start dashboard at http://localhost:8087
 """
 
 COMMANDS = {
     "scan": cmd_scan,
+    "reconcile": cmd_reconcile,
     "today": cmd_today,
     "stats": cmd_stats,
     "dashboard": cmd_dashboard,
