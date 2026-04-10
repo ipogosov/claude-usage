@@ -9,7 +9,9 @@ Claude Code writes detailed usage logs locally — token counts, models, session
 
 ![Claude Usage Dashboard](docs/screenshot.png)
 
-**Created by:** [Ivan Pogosov](https://github.com/ipogosov)
+**Created with [Claude Code](https://claude.ai/code) by [Ivan Pogosov](https://github.com/ipogosov)**
+
+Forked from [phuryn/claude-usage](https://github.com/phuryn/claude-usage)
 
 ---
 
