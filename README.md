@@ -68,7 +68,7 @@ python cli.py today
 # Show all-time statistics (in terminal)
 python cli.py stats
 
-# Scan + open browser dashboard at http://localhost:8080
+# Scan + open browser dashboard at http://localhost:8087
 python cli.py dashboard
 ```
 
@@ -87,7 +87,7 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/`. Each lin
 
 `scanner.py` parses those files and stores the data in a SQLite database at `~/.claude/usage.db`.
 
-`dashboard.py` serves a single-page dashboard on `localhost:8080` with Chart.js charts (loaded from CDN). It auto-refreshes every 30 seconds and supports model filtering with bookmarkable URLs.
+`dashboard.py` serves a single-page dashboard on `localhost:8087` with Chart.js charts (loaded from CDN). It auto-refreshes every 30 seconds and supports model filtering with bookmarkable URLs.
 
 ---
 

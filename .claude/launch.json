@@ -5,7 +5,7 @@
       "name": "claude-usage-dashboard",
       "runtimeExecutable": "python",
       "runtimeArgs": ["dashboard.py"],
-      "port": 8080
+      "port": 8087
     }
   ]
 }

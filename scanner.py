@@ -72,15 +72,22 @@ def project_name_from_cwd(cwd):
     return parts[-1] if parts else "unknown"
 
 
-def parse_jsonl_file(filepath):
-    """Parse a JSONL file and yield (session_data, turns) tuples."""
+def parse_jsonl_file(filepath, turns_offset=0):
+    """Parse a JSONL file in a single pass.
+
+    Collects session metadata from ALL lines (needed for accurate first/last timestamps).
+    Collects turns only from lines >= turns_offset (0 = all lines, N = incremental update).
+    Returns: (session_metas, turns, total_line_count)
+    """
     turns = []
     session_meta = {}  # session_id -> dict
+    line_count = 0
 
     try:
         with open(filepath, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
+            for i, raw_line in enumerate(f):
+                line_count += 1
+                line = raw_line.strip()
                 if not line:
                     continue
                 try:
@@ -100,7 +107,7 @@ def parse_jsonl_file(filepath):
                 cwd = record.get("cwd", "")
                 git_branch = record.get("gitBranch", "")
 
-                # Update session metadata from any record
+                # Update session metadata from ALL records
                 if session_id not in session_meta:
                     session_meta[session_id] = {
                         "session_id": session_id,
@@ -119,7 +126,8 @@ def parse_jsonl_file(filepath):
                     if git_branch and not meta["git_branch"]:
                         meta["git_branch"] = git_branch
 
-                if rtype == "assistant":
+                # Collect turns only from new lines
+                if rtype == "assistant" and i >= turns_offset:
                     msg = record.get("message", {})
                     usage = msg.get("usage", {})
                     model = msg.get("model", "")
@@ -129,11 +137,9 @@ def parse_jsonl_file(filepath):
                     cache_read = usage.get("cache_read_input_tokens", 0) or 0
                     cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
 
-                    # Only record turns that have actual token usage
                     if input_tokens + output_tokens + cache_read + cache_creation == 0:
                         continue
 
-                    # Extract tool name from content if present
                     tool_name = None
                     for item in msg.get("content", []):
                         if isinstance(item, dict) and item.get("type") == "tool_use":
@@ -158,7 +164,7 @@ def parse_jsonl_file(filepath):
     except Exception as e:
         print(f"  Warning: error reading {filepath}: {e}")
 
-    return list(session_meta.values()), turns
+    return list(session_meta.values()), turns, line_count
 
 
 def aggregate_sessions(session_metas, turns):
@@ -281,104 +287,24 @@ def scan(projects_dir=PROJECTS_DIR, db_path=DB_PATH, verbose=True):
             continue
 
         is_new = row is None
+        old_lines = row["lines"] if row else 0
+
         if verbose:
             status = "NEW" if is_new else "UPD"
             print(f"  [{status}] {os.path.relpath(filepath, projects_dir)}")
 
-        session_metas, turns = parse_jsonl_file(filepath)
+        # Single pass: metadata from all lines, turns from new lines only
+        session_metas, turns, line_count = parse_jsonl_file(filepath, turns_offset=old_lines)
+
+        if line_count <= old_lines and not is_new:
+            # mtime changed but no new lines (e.g. touch)
+            conn.execute("UPDATE processed_files SET mtime = ? WHERE path = ?", (mtime, filepath))
+            conn.commit()
+            skipped_files += 1
+            continue
 
         if turns or session_metas:
             sessions = aggregate_sessions(session_metas, turns)
-
-            # For incremental updates: only insert turns not already in DB
-            if not is_new:
-                # Get existing turns count to detect which are new
-                # Simple approach: delete old turns for these sessions and re-insert
-                # More correct: track file line count and only process new lines
-                old_lines = row["lines"] if row else 0
-                # Re-parse only if file grew
-                current_lines = sum(1 for _ in open(filepath, encoding="utf-8", errors="replace"))
-
-                if current_lines <= old_lines:
-                    conn.execute("UPDATE processed_files SET mtime = ? WHERE path = ?",
-                                 (mtime, filepath))
-                    conn.commit()
-                    skipped_files += 1
-                    continue
-
-                # Only process the new lines
-                new_turns = []
-                new_metas = {}
-                try:
-                    with open(filepath, encoding="utf-8", errors="replace") as f:
-                        for i, line in enumerate(f):
-                            if i < old_lines:
-                                continue
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                record = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-
-                            rtype = record.get("type")
-                            if rtype != "assistant":
-                                continue
-
-                            session_id = record.get("sessionId")
-                            if not session_id:
-                                continue
-
-                            msg = record.get("message", {})
-                            usage = msg.get("usage", {})
-                            input_tokens = usage.get("input_tokens", 0) or 0
-                            output_tokens = usage.get("output_tokens", 0) or 0
-                            cache_read = usage.get("cache_read_input_tokens", 0) or 0
-                            cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
-
-                            if input_tokens + output_tokens + cache_read + cache_creation == 0:
-                                continue
-
-                            tool_name = None
-                            for item in msg.get("content", []):
-                                if isinstance(item, dict) and item.get("type") == "tool_use":
-                                    tool_name = item.get("name")
-                                    break
-
-                            new_turns.append({
-                                "session_id": session_id,
-                                "timestamp": record.get("timestamp", ""),
-                                "model": msg.get("model", ""),
-                                "input_tokens": input_tokens,
-                                "output_tokens": output_tokens,
-                                "cache_read_tokens": cache_read,
-                                "cache_creation_tokens": cache_creation,
-                                "tool_name": tool_name,
-                                "cwd": record.get("cwd", ""),
-                            })
-                except Exception as e:
-                    print(f"  Warning: {e}")
-
-                turns = new_turns
-                sessions = aggregate_sessions(list(new_metas.values()) or [], turns)
-                # Update session timestamps from full parse
-                for meta in session_metas:
-                    sessions_to_update = [s for s in sessions if s["session_id"] == meta["session_id"]]
-                    if not sessions_to_update:
-                        # Session exists but no new turns -- still update timestamps
-                        sessions.append({**meta,
-                                         "total_input_tokens": 0,
-                                         "total_output_tokens": 0,
-                                         "total_cache_read": 0,
-                                         "total_cache_creation": 0,
-                                         "turn_count": 0,
-                                         "model": meta.get("model")})
-
-                updated_files += 1
-            else:
-                new_files += 1
-
             upsert_sessions(conn, sessions)
             insert_turns(conn, turns)
 
@@ -386,13 +312,16 @@ def scan(projects_dir=PROJECTS_DIR, db_path=DB_PATH, verbose=True):
                 total_sessions.add(s["session_id"])
             total_turns += len(turns)
 
-        # Record file as processed
-        line_count = sum(1 for _ in open(filepath, encoding="utf-8", errors="replace"))
         conn.execute("""
             INSERT OR REPLACE INTO processed_files (path, mtime, lines)
             VALUES (?, ?, ?)
         """, (filepath, mtime, line_count))
         conn.commit()
+
+        if is_new:
+            new_files += 1
+        else:
+            updated_files += 1
 
     if verbose:
         print(f"\nScan complete:")
@@ -405,6 +334,23 @@ def scan(projects_dir=PROJECTS_DIR, db_path=DB_PATH, verbose=True):
     conn.close()
     return {"new": new_files, "updated": updated_files, "skipped": skipped_files,
             "turns": total_turns, "sessions": len(total_sessions)}
+
+
+def reconcile_sessions(db_path=DB_PATH):
+    """Recompute session-level token aggregates from the turns table."""
+    conn = get_db(db_path)
+    conn.execute("""
+        UPDATE sessions SET
+            total_input_tokens   = (SELECT COALESCE(SUM(input_tokens), 0)          FROM turns t WHERE t.session_id = sessions.session_id),
+            total_output_tokens  = (SELECT COALESCE(SUM(output_tokens), 0)         FROM turns t WHERE t.session_id = sessions.session_id),
+            total_cache_read     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM turns t WHERE t.session_id = sessions.session_id),
+            total_cache_creation = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM turns t WHERE t.session_id = sessions.session_id),
+            turn_count           = (SELECT COUNT(*)                                 FROM turns t WHERE t.session_id = sessions.session_id)
+    """)
+    conn.commit()
+    affected = conn.execute("SELECT changes()").fetchone()[0]
+    conn.close()
+    print(f"Reconciled {affected} sessions from turns table.")
 
 
 if __name__ == "__main__":

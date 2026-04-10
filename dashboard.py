@@ -6,7 +6,7 @@ import json
 import sqlite3
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from pricing import calc_cost_breakdown, is_billable
 
@@ -86,19 +86,22 @@ def get_dashboard_data(db_path=DB_PATH, tz_offset=0):
         ORDER BY last_timestamp DESC
     """).fetchall()
 
+    tz_delta = timedelta(minutes=tz_offset)
     sessions_all = []
     for r in session_rows:
         try:
             t1 = datetime.fromisoformat(r["first_timestamp"].replace("Z", "+00:00"))
             t2 = datetime.fromisoformat(r["last_timestamp"].replace("Z", "+00:00"))
             duration_min = round((t2 - t1).total_seconds() / 60, 1)
+            t2_local = t2 + tz_delta
         except Exception:
             duration_min = 0
+            t2_local = None
         sessions_all.append({
             "session_id":   r["session_id"][:8],
             "project":      r["project_name"] or "unknown",
-            "last":         (r["last_timestamp"] or "")[:16].replace("T", " "),
-            "last_date":    (r["last_timestamp"] or "")[:10],
+            "last":         t2_local.strftime("%Y-%m-%d %H:%M") if t2_local else "",
+            "last_date":    t2_local.strftime("%Y-%m-%d") if t2_local else "",
             "duration_min": duration_min,
             "model":        r["model"] or "unknown",
             "turns":        r["turn_count"] or 0,
@@ -152,7 +155,7 @@ def get_dashboard_data(db_path=DB_PATH, tz_offset=0):
         "daily_by_model":      daily_by_model,
         "sessions_all":        sessions_all,
         "session_model_daily": session_model_daily,
-        "generated_at":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at":        (datetime.utcnow() + tz_delta).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -313,6 +316,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   tr:hover td { background: rgba(255,255,255,0.018); }
   .model-tag { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 500; }
   .cost { color: var(--green); font-family: 'JetBrains Mono', monospace; }
+  .cost-sub { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
   .cost-na { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
   .num { font-family: 'JetBrains Mono', monospace; }
   .muted { color: var(--muted); }
@@ -328,6 +332,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     margin-bottom: 18px; overflow-x: auto;
   }
 
+  #top-bar { position: sticky; top: 0; z-index: 100; }
+
   footer { border-top: 1px solid var(--border); padding: 14px 24px; margin-top: 4px; }
   .footer-content { max-width: 1440px; margin: 0 auto; }
   .footer-content p { color: var(--muted); font-size: 11px; line-height: 1.7; margin-bottom: 3px; }
@@ -339,6 +345,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
+<div id="top-bar">
 <header>
   <h1>Claude Code Usage Dashboard</h1>
   <div class="meta" id="meta">Loading...</div>
@@ -374,6 +381,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     Auto-update
   </label>
 </div>
+</div>
 
 <div class="container">
   <div class="stats-row" id="stats-row"></div>
@@ -396,7 +404,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <table>
       <thead><tr>
         <th>Session</th><th>Project</th><th>Last Active</th><th>Duration</th>
-        <th>Model</th><th>Turns</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Est. Cost</th>
+        <th>Model</th><th>Turns</th><th>Total In</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Est. Cost</th>
       </tr></thead>
       <tbody id="sessions-body"></tbody>
     </table>
@@ -405,10 +413,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="section-title">Cost by Model</div>
     <table>
       <thead><tr>
-        <th>Model</th><th>Turns</th><th>Input</th><th>Output</th>
-        <th>Cache Read</th><th>Cache Creation</th><th>Est. Cost</th>
+        <th>Model</th><th>Turns</th><th>Total In</th><th>Input</th><th>Output</th>
+        <th>Cache Read</th><th>Cache Creation</th>
         <th>Cost/Turn</th><th>Eff. $/1M In</th><th>Eff. $/1M Out</th>
-        <th>Cache Hit</th><th>Cache Savings</th>
+        <th>Cache Hit</th><th>Cache Savings</th><th>Est. Cost</th>
       </tr></thead>
       <tbody id="model-cost-body"></tbody>
     </table>
@@ -516,9 +524,13 @@ function setRange(range) {
   document.querySelectorAll('.range-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.range === range)
   );
-  if (range !== 'custom') {
+  if (range === 'all') {
     document.getElementById('date-from').value = '';
     document.getElementById('date-to').value = '';
+  } else if (range !== 'custom') {
+    const cutoff = getRangeCutoff(range);
+    document.getElementById('date-from').value = cutoff.from || '';
+    document.getElementById('date-to').value = getLocalDate(new Date());
   }
   updateURL();
   applyFilter();
@@ -879,6 +891,7 @@ function renderSessionsTable(sessions) {
       <td class="muted">${s.duration_min}m</td>
       <td>${modelTags}</td>
       <td class="num">${fmt(s.turns)}</td>
+      <td class="num">${fmt(s.input + s.cache_read + s.cache_creation)}</td>
       <td class="num">${fmt(s.input)}</td>
       <td class="num">${fmt(s.output)}</td>
       <td class="num muted">${fmt(s.cache_read)}</td>
@@ -897,7 +910,7 @@ function renderModelCostTable(byModel) {
     const totalInputCost = m.input_cost + m.cache_read_cost + m.cache_creation_cost;
 
     const costSub = (v) => billable
-      ? `<br><span class="cost" style="font-size:11px">(${fmtCost(v)})</span>`
+      ? `<br><span class="cost-sub">(${fmtCost(v)})</span>`
       : '';
 
     const costCell    = billable ? `<td class="cost">${fmtCost(m.cost)}</td>` : na;
@@ -929,12 +942,13 @@ function renderModelCostTable(byModel) {
     return `<tr>
       <td><span class="model-tag" style="${getModelTagStyle(m.model)}">${m.model}</span></td>
       <td class="num">${fmt(m.turns)}${costSub(m.cost)}</td>
+      <td class="num">${fmt(totalInputSide)}${costSub(totalInputCost)}</td>
       <td class="num">${fmt(m.input)}${costSub(m.input_cost)}</td>
       <td class="num">${fmt(m.output)}${costSub(m.output_cost)}</td>
       <td class="num">${fmt(m.cache_read)}${costSub(m.cache_read_cost)}</td>
       <td class="num">${fmt(m.cache_creation)}${costSub(m.cache_creation_cost)}</td>
-      ${costCell}${costPerTurn}${effInCell}${effOutCell}
-      ${cacheHitCell}${cacheSavingsCell}
+      ${costPerTurn}${effInCell}${effOutCell}
+      ${cacheHitCell}${cacheSavingsCell}${costCell}
     </tr>`;
   }).join('');
 }
