@@ -352,6 +352,224 @@ def reconcile_sessions(db_path=DB_PATH):
     conn.close()
     print(f"Reconciled {affected} sessions from turns table.")
 
+def resolve_session_id(session_prefix, db_path=DB_PATH):
+    """Resolve an 8-char session ID prefix to the full session ID."""
+    conn = get_db(db_path)
+    row = conn.execute(
+        "SELECT session_id FROM sessions WHERE session_id LIKE ? LIMIT 1",
+        (session_prefix + "%",)
+    ).fetchone()
+    conn.close()
+    return row["session_id"] if row else None
+
+
+def get_session_transcript(session_id, projects_dir=PROJECTS_DIR, db_path=DB_PATH):
+    """Read raw JSONL files and extract full conversation for a session.
+
+    Returns a list of turn dicts with full message content, ordered by timestamp.
+    The DB only stores token counts — this reads the original JSONL for content.
+    """
+    from pricing import calc_cost, calc_cost_breakdown
+
+    # Resolve short prefix to full ID if needed
+    if len(session_id) < 36:
+        full_id = resolve_session_id(session_id, db_path)
+        if not full_id:
+            return []
+        session_id = full_id
+
+    # Find all JSONL files (the session could appear in any of them,
+    # though typically each file contains one session)
+    jsonl_files = glob.glob(str(projects_dir / "**" / "*.jsonl"), recursive=True)
+
+    turns = []
+    session_meta = {
+        "session_id": session_id,
+        "project": "unknown",
+        "model": None,
+        "cwd": None,
+    }
+
+    for filepath in jsonl_files:
+        try:
+            with open(filepath, encoding="utf-8", errors="replace") as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if record.get("sessionId") != session_id:
+                        continue
+
+                    rtype = record.get("type")
+                    timestamp = record.get("timestamp", "")
+                    cwd = record.get("cwd", "")
+
+                    if cwd and not session_meta["cwd"]:
+                        session_meta["cwd"] = cwd
+                        session_meta["project"] = project_name_from_cwd(cwd)
+
+                    if rtype == "user":
+                        msg = record.get("message", {})
+                        raw_content = msg.get("content", "")
+
+                        # Normalize content to a list of blocks
+                        content_blocks = []
+                        if isinstance(raw_content, str):
+                            if raw_content.strip():
+                                content_blocks.append({
+                                    "type": "text",
+                                    "text": raw_content,
+                                })
+                        elif isinstance(raw_content, list):
+                            for item in raw_content:
+                                if isinstance(item, dict):
+                                    itype = item.get("type")
+                                    if itype == "tool_result":
+                                        result_content = item.get("content", "")
+                                        if isinstance(result_content, list):
+                                            # Flatten nested content blocks
+                                            parts = []
+                                            for rc in result_content:
+                                                if isinstance(rc, dict) and rc.get("type") == "text":
+                                                    parts.append(rc.get("text", ""))
+                                                elif isinstance(rc, str):
+                                                    parts.append(rc)
+                                            result_content = "\n".join(parts) if parts else str(result_content)
+                                        content_blocks.append({
+                                            "type": "tool_result",
+                                            "tool_use_id": item.get("tool_use_id", ""),
+                                            "content": result_content,
+                                        })
+                                    elif itype == "text":
+                                        content_blocks.append({
+                                            "type": "text",
+                                            "text": item.get("text", ""),
+                                        })
+
+                        if content_blocks:
+                            turns.append({
+                                "type": "user",
+                                "timestamp": timestamp,
+                                "content": content_blocks,
+                            })
+
+                    elif rtype == "assistant":
+                        msg = record.get("message", {})
+                        usage = msg.get("usage", {})
+                        model = msg.get("model", "")
+                        raw_content = msg.get("content", [])
+
+                        if model:
+                            session_meta["model"] = model
+
+                        input_tokens = usage.get("input_tokens", 0) or 0
+                        output_tokens = usage.get("output_tokens", 0) or 0
+                        cache_read = usage.get("cache_read_input_tokens", 0) or 0
+                        cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
+
+                        content_blocks = []
+                        for item in raw_content:
+                            if not isinstance(item, dict):
+                                continue
+                            itype = item.get("type")
+                            if itype == "thinking":
+                                thinking_text = item.get("thinking", "")
+                                if thinking_text:
+                                    content_blocks.append({
+                                        "type": "thinking",
+                                        "text": thinking_text,
+                                    })
+                            elif itype == "text":
+                                text = item.get("text", "")
+                                if text:
+                                    content_blocks.append({
+                                        "type": "text",
+                                        "text": text,
+                                    })
+                            elif itype == "tool_use":
+                                content_blocks.append({
+                                    "type": "tool_use",
+                                    "name": item.get("name", ""),
+                                    "id": item.get("id", ""),
+                                    "input": item.get("input", {}),
+                                })
+
+                        cost = calc_cost(model, input_tokens, output_tokens,
+                                         cache_read, cache_creation)
+                        bd = calc_cost_breakdown(model, input_tokens, output_tokens,
+                                                 cache_read, cache_creation)
+
+                        turns.append({
+                            "type": "assistant",
+                            "timestamp": timestamp,
+                            "model": model,
+                            "content": content_blocks,
+                            "usage": {
+                                "input_tokens": input_tokens,
+                                "output_tokens": output_tokens,
+                                "cache_read": cache_read,
+                                "cache_creation": cache_creation,
+                            },
+                            "cost": cost,
+                            "cost_breakdown": {
+                                "input": bd["input_cost"],
+                                "output": bd["output_cost"],
+                                "cache_read": bd["cache_read_cost"],
+                                "cache_creation": bd["cache_creation_cost"],
+                            },
+                        })
+
+        except Exception as e:
+            continue
+
+    # Sort by timestamp
+    turns.sort(key=lambda t: t.get("timestamp", ""))
+
+    # Build summary
+    total_cost = sum(t.get("cost", 0) for t in turns if t["type"] == "assistant")
+    total_input = sum(t.get("usage", {}).get("input_tokens", 0) for t in turns if t["type"] == "assistant")
+    total_output = sum(t.get("usage", {}).get("output_tokens", 0) for t in turns if t["type"] == "assistant")
+    total_cache_read = sum(t.get("usage", {}).get("cache_read", 0) for t in turns if t["type"] == "assistant")
+    total_cache_creation = sum(t.get("usage", {}).get("cache_creation", 0) for t in turns if t["type"] == "assistant")
+    total_cost_breakdown = {
+        "input": sum(t.get("cost_breakdown", {}).get("input", 0) for t in turns if t["type"] == "assistant"),
+        "output": sum(t.get("cost_breakdown", {}).get("output", 0) for t in turns if t["type"] == "assistant"),
+        "cache_read": sum(t.get("cost_breakdown", {}).get("cache_read", 0) for t in turns if t["type"] == "assistant"),
+        "cache_creation": sum(t.get("cost_breakdown", {}).get("cache_creation", 0) for t in turns if t["type"] == "assistant"),
+    }
+    assistant_turns = [t for t in turns if t["type"] == "assistant"]
+
+    first_ts = turns[0]["timestamp"] if turns else ""
+    last_ts = turns[-1]["timestamp"] if turns else ""
+    try:
+        t1 = datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
+        t2 = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+        duration_min = round((t2 - t1).total_seconds() / 60, 1)
+    except Exception:
+        duration_min = 0
+
+    return {
+        "session_id": session_id,
+        "project": session_meta["project"],
+        "model": session_meta["model"] or "unknown",
+        "first_timestamp": first_ts,
+        "last_timestamp": last_ts,
+        "duration_min": duration_min,
+        "total_cost": total_cost,
+        "total_cost_breakdown": total_cost_breakdown,
+        "total_input": total_input,
+        "total_output": total_output,
+        "total_cache_read": total_cache_read,
+        "total_cache_creation": total_cache_creation,
+        "turn_count": len(assistant_turns),
+        "turns": turns,
+    }
+
 
 if __name__ == "__main__":
     print(f"Scanning {PROJECTS_DIR} ...")

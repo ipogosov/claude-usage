@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 pricing.py — Single source of truth for Anthropic API pricing.
 https://docs.anthropic.com/en/docs/about-claude/pricing  (April 2026)
