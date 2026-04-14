@@ -885,7 +885,7 @@ function renderSessionsTable(sessions) {
       .map(m => `<span class="model-tag" style="${getModelTagStyle(m)}">${m}</span>`)
       .join(' ');
     return `<tr>
-      <td class="muted" style="font-family:monospace">${s.session_id}&hellip;</td>
+      <td class="muted" style="font-family:monospace"><a href="/session/${s.session_id}" style="color:var(--accent);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">${s.session_id}&hellip;</a></td>
       <td>${s.project}</td>
       <td class="muted">${s.last}</td>
       <td class="muted">${s.duration_min}m</td>
@@ -1009,6 +1009,432 @@ loadData();
 </html>
 """
 
+SESSION_HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Session Inspector</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #100e0d;
+    --card: #211d18;
+    --card-hover: #2a2520;
+    --border: #2e2824;
+    --border-muted: #3a322d;
+    --text: #ece5de;
+    --muted: #7d6f63;
+    --accent: #d97757;
+    --blue: #60a5fa;
+    --green: #4ade80;
+    --yellow: #fcd34d;
+    --red: #f87171;
+    --user-border: #3a322d;
+    --assistant-border: #d97757;
+    --thinking-bg: rgba(96,165,250,0.06);
+    --tool-bg: rgba(74,222,128,0.06);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  header {
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky; top: 0; z-index: 100;
+  }
+  header h1 { font-size: 14px; font-weight: 600; color: var(--accent); letter-spacing: -0.01em; }
+  .back-link {
+    color: var(--muted); font-size: 12px; text-decoration: none;
+    transition: color 0.15s;
+  }
+  .back-link:hover { color: var(--text); }
+  .header-meta { color: var(--muted); font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+
+  .container { max-width: 960px; margin: 0 auto; padding: 18px 24px; }
+
+  /* Summary cards */
+  .summary-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 24px; }
+  .stat-card { background: var(--card); border-radius: 7px; padding: 13px 15px; }
+  .stat-card .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 5px; font-weight: 500; }
+  .stat-card .value { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; letter-spacing: -0.02em; }
+  .stat-card .sub { color: var(--muted); font-size: 10px; margin-top: 3px; }
+
+  /* Turn cards */
+  .turn { margin-bottom: 12px; border-radius: 7px; overflow: hidden; }
+  .turn-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .turn-body { padding: 12px 16px; }
+
+  .turn--user { border-left: 3px solid var(--user-border); background: var(--card); }
+  .turn--user .turn-header { color: var(--muted); background: rgba(255,255,255,0.02); }
+
+  .turn--assistant { border-left: 3px solid var(--assistant-border); background: var(--card); }
+  .turn--assistant .turn-header { color: var(--accent); background: rgba(217,119,87,0.06); }
+
+  .turn-time { margin-left: auto; font-weight: 400; color: var(--muted); font-family: 'JetBrains Mono', monospace; text-transform: none; }
+  .turn-cost { color: var(--green); font-family: 'JetBrains Mono', monospace; font-weight: 500; text-transform: none; }
+  .turn-tokens { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-weight: 400; font-size: 10px; text-transform: none; }
+  .model-tag { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+
+  /* Content blocks */
+  .content-block { margin-bottom: 10px; }
+  .content-block:last-child { margin-bottom: 0; }
+
+  .text-content {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  /* Thinking blocks */
+  .thinking-block {
+    background: var(--thinking-bg);
+    border: 1px solid rgba(96,165,250,0.15);
+    border-radius: 5px;
+    overflow: hidden;
+  }
+  .thinking-block summary {
+    padding: 6px 12px;
+    font-size: 11px;
+    color: var(--blue);
+    cursor: pointer;
+    user-select: none;
+    font-weight: 500;
+  }
+  .thinking-block summary:hover { background: rgba(96,165,250,0.08); }
+  .thinking-content {
+    padding: 10px 14px;
+    font-size: 12px;
+    color: var(--muted);
+    font-style: italic;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-top: 1px solid rgba(96,165,250,0.1);
+    max-height: 400px;
+    overflow-y: auto;
+  }
+
+  /* Tool blocks */
+  .tool-block {
+    background: var(--tool-bg);
+    border: 1px solid rgba(74,222,128,0.15);
+    border-radius: 5px;
+    overflow: hidden;
+  }
+  .tool-block summary {
+    padding: 6px 12px;
+    font-size: 11px;
+    color: var(--green);
+    cursor: pointer;
+    user-select: none;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .tool-block summary:hover { background: rgba(74,222,128,0.08); }
+  .tool-name { font-family: 'JetBrains Mono', monospace; }
+  .tool-content {
+    padding: 10px 14px;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-top: 1px solid rgba(74,222,128,0.1);
+    max-height: 500px;
+    overflow-y: auto;
+  }
+
+  /* Tool results */
+  .tool-result-block {
+    background: rgba(252,211,77,0.04);
+    border: 1px solid rgba(252,211,77,0.12);
+    border-radius: 5px;
+    overflow: hidden;
+  }
+  .tool-result-block summary {
+    padding: 6px 12px;
+    font-size: 11px;
+    color: var(--yellow);
+    cursor: pointer;
+    user-select: none;
+    font-weight: 500;
+  }
+  .tool-result-block summary:hover { background: rgba(252,211,77,0.06); }
+  .tool-result-content {
+    padding: 10px 14px;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-top: 1px solid rgba(252,211,77,0.08);
+    max-height: 500px;
+    overflow-y: auto;
+  }
+
+  .loading { text-align: center; padding: 60px; color: var(--muted); }
+  .error { text-align: center; padding: 60px; color: var(--red); }
+
+  /* Cost breakdown bar */
+  .cost-bar {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    padding: 6px 0 2px;
+    font-size: 10px; font-family: 'JetBrains Mono', monospace;
+  }
+  .cost-item {
+    display: inline-flex; align-items: center; gap: 3px;
+    padding: 2px 6px; border-radius: 3px;
+    background: rgba(255,255,255,0.03);
+  }
+  .cost-item .ci-label { color: var(--muted); }
+  .cost-item .ci-val { color: var(--text); }
+  .cost-item .ci-pct { color: var(--muted); font-size: 9px; }
+  .ci-input { border-left: 2px solid rgba(96,165,250,0.6); }
+  .ci-output { border-left: 2px solid rgba(251,146,60,0.6); }
+  .ci-cache-read { border-left: 2px solid rgba(74,222,128,0.6); }
+  .ci-cache-write { border-left: 2px solid rgba(252,211,77,0.6); }
+
+  /* Collapsed text blocks */
+  .text-block { border-radius: 5px; overflow: hidden; }
+  .text-block summary {
+    padding: 6px 12px; font-size: 11px; color: var(--text);
+    cursor: pointer; user-select: none;
+  }
+  .text-block summary:hover { background: rgba(255,255,255,0.03); }
+  .text-block .text-content {
+    padding: 10px 14px;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Summary cost breakdown */
+  .cost-summary-card { background: var(--card); border-radius: 7px; padding: 13px 15px; grid-column: 1 / -1; }
+  .cost-summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .cost-col .cost-col-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 4px; font-weight: 500; }
+  .cost-col .cost-col-value { font-size: 16px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+  .cost-col .cost-col-pct { color: var(--muted); font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <a href="/" class="back-link">&larr; Dashboard</a>
+    <h1 id="page-title">Session Inspector</h1>
+  </div>
+  <div class="header-meta" id="header-meta">Loading...</div>
+</header>
+<div class="container">
+  <div class="summary-row" id="summary-row"></div>
+  <div id="turns-container"><div class="loading">Loading session data...</div></div>
+</div>
+
+<script>
+const SESSION_ID = window.location.pathname.split('/session/')[1] || '';
+
+function fmt(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(2)+'B';
+  if (n >= 1e6) return (n/1e6).toFixed(2)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return n.toLocaleString();
+}
+function fmtCost(c) { return '$' + c.toFixed(4); }
+function fmtCostBig(c) { return '$' + c.toFixed(2); }
+
+function getModelTagStyle(model) {
+  const m = (model || '').toLowerCase();
+  if (m.includes('opus'))   return 'background:rgba(217,119,87,0.15);color:#d97757;';
+  if (m.includes('sonnet')) return 'background:rgba(96,165,250,0.15);color:#60a5fa;';
+  if (m.includes('haiku'))  return 'background:rgba(74,222,128,0.12);color:#4ade80;';
+  return 'background:rgba(125,111,99,0.15);color:#7d6f63;';
+}
+
+function escapeHtml(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+
+function formatTime(ts) {
+  if (!ts) return '';
+  try {
+    const d = new Date(ts);
+    return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  } catch { return ''; }
+}
+
+function renderBlock(block) {
+  if (block.type === 'text') {
+    const preview = block.text.length > 120 ? block.text.slice(0, 120).replace(/\n/g, ' ') + '\u2026' : block.text.replace(/\n/g, ' ');
+    return `<div class="content-block"><details class="text-block">
+      <summary>${escapeHtml(preview)}</summary>
+      <div class="text-content">${escapeHtml(block.text)}</div>
+    </details></div>`;
+  }
+  if (block.type === 'thinking') {
+    return `<div class="content-block"><details class="thinking-block">
+      <summary>\u{1f9e0} Thinking (${fmt(block.text.length)} chars)</summary>
+      <div class="thinking-content">${escapeHtml(block.text)}</div>
+    </details></div>`;
+  }
+  if (block.type === 'tool_use') {
+    const inputStr = typeof block.input === 'object' ? JSON.stringify(block.input, null, 2) : String(block.input || '');
+    return `<div class="content-block"><details class="tool-block">
+      <summary>\u{1f527} <span class="tool-name">${escapeHtml(block.name)}</span></summary>
+      <div class="tool-content">${escapeHtml(inputStr)}</div>
+    </details></div>`;
+  }
+  if (block.type === 'tool_result') {
+    const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2);
+    const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;
+    return `<div class="content-block"><details class="tool-result-block">
+      <summary>\u{1f4e4} Tool Result (${fmt(content.length)} chars)</summary>
+      <div class="tool-result-content">${escapeHtml(content)}</div>
+    </details></div>`;
+  }
+  return '';
+}
+
+function renderCostBar(bd, total) {
+  if (!bd || total <= 0) return '';
+  const items = [
+    { label: 'Input', val: bd.input, cls: 'ci-input' },
+    { label: 'Output', val: bd.output, cls: 'ci-output' },
+    { label: 'Cache Read', val: bd.cache_read, cls: 'ci-cache-read' },
+    { label: 'Cache Write', val: bd.cache_creation, cls: 'ci-cache-write' },
+  ];
+  return `<div class="cost-bar">${items.map(i => {
+    const pct = total > 0 ? (i.val / total * 100) : 0;
+    return `<span class="cost-item ${i.cls}"><span class="ci-label">${i.label}</span> <span class="ci-val">$${i.val.toFixed(2)}</span> <span class="ci-pct">${pct.toFixed(0)}%</span></span>`;
+  }).join('')}</div>`;
+}
+
+function renderTurn(turn, index) {
+  if (turn.type === 'user') {
+    return `<div class="turn turn--user">
+      <div class="turn-header">
+        <span>User</span>
+        <span class="turn-time">${formatTime(turn.timestamp)}</span>
+      </div>
+      <div class="turn-body">${turn.content.map(renderBlock).join('')}</div>
+    </div>`;
+  }
+  if (turn.type === 'assistant') {
+    const u = turn.usage || {};
+    const totalIn = (u.input_tokens||0) + (u.cache_read||0) + (u.cache_creation||0);
+    const tokenInfo = `in:${fmt(totalIn)} out:${fmt(u.output_tokens||0)}`;
+    const costStr = turn.cost > 0 ? `$${turn.cost.toFixed(2)}` : '';
+    const modelTag = turn.model
+      ? `<span class="model-tag" style="${getModelTagStyle(turn.model)}">${turn.model}</span>`
+      : '';
+    const costBar = renderCostBar(turn.cost_breakdown, turn.cost);
+    return `<div class="turn turn--assistant">
+      <div class="turn-header">
+        <span>Assistant</span>
+        ${modelTag}
+        <span class="turn-tokens">${tokenInfo}</span>
+        ${costStr ? `<span class="turn-cost">${costStr}</span>` : ''}
+        <span class="turn-time">${formatTime(turn.timestamp)}</span>
+      </div>
+      ${costBar}
+      <div class="turn-body">${turn.content.map(renderBlock).join('')}</div>
+    </div>`;
+  }
+  return '';
+}
+
+async function loadSession() {
+  try {
+    const resp = await fetch(`/api/session/${SESSION_ID}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+
+    if (data.error) {
+      document.getElementById('turns-container').innerHTML = `<div class="error">${data.error}</div>`;
+      return;
+    }
+
+    // Update header
+    document.getElementById('page-title').textContent = `Session ${data.session_id.slice(0, 8)}\u2026`;
+    document.getElementById('header-meta').textContent = `${data.project} \u00b7 ${data.model} \u00b7 ${data.duration_min}min`;
+
+    // Summary cards
+    const stats = [
+      { label: 'Turns', value: data.turn_count },
+      { label: 'Duration', value: data.duration_min + 'm' },
+      { label: 'Input', value: fmt(data.total_input) },
+      { label: 'Output', value: fmt(data.total_output) },
+      { label: 'Cache Read', value: fmt(data.total_cache_read) },
+      { label: 'Cache Write', value: fmt(data.total_cache_creation) },
+      { label: 'Est. Cost', value: fmtCostBig(data.total_cost), color: '#4ade80' },
+    ];
+    let summaryHtml = stats.map(s =>
+      `<div class="stat-card">
+        <div class="label">${s.label}</div>
+        <div class="value" style="${s.color ? 'color:' + s.color : ''}">${s.value}</div>
+      </div>`
+    ).join('');
+
+    // Cost breakdown summary card
+    const tb = data.total_cost_breakdown || {};
+    const tc = data.total_cost || 0;
+    if (tc > 0) {
+      const cols = [
+        { label: 'Input Cost', val: tb.input || 0, color: 'rgba(96,165,250,0.85)' },
+        { label: 'Output Cost', val: tb.output || 0, color: 'rgba(251,146,60,0.85)' },
+        { label: 'Cache Read Cost', val: tb.cache_read || 0, color: 'rgba(74,222,128,0.75)' },
+        { label: 'Cache Write Cost', val: tb.cache_creation || 0, color: 'rgba(252,211,77,0.75)' },
+      ];
+      summaryHtml += `<div class="cost-summary-card">
+        <div class="label" style="margin-bottom:10px">Cost Breakdown</div>
+        <div class="cost-summary-grid">${cols.map(c => {
+          const pct = tc > 0 ? (c.val / tc * 100) : 0;
+          return `<div class="cost-col">
+            <div class="cost-col-label">${c.label}</div>
+            <div class="cost-col-value" style="color:${c.color}">$${c.val.toFixed(2)}</div>
+            <div class="cost-col-pct">${pct.toFixed(1)}%</div>
+          </div>`;
+        }).join('')}</div>
+      </div>`;
+    }
+    document.getElementById('summary-row').innerHTML = summaryHtml;
+
+    // Render turns
+    if (data.turns.length === 0) {
+      document.getElementById('turns-container').innerHTML = '<div class="loading">No conversation data found for this session.</div>';
+      return;
+    }
+    document.getElementById('turns-container').innerHTML = data.turns.map(renderTurn).join('');
+
+  } catch(e) {
+    document.getElementById('turns-container').innerHTML = `<div class="error">Failed to load session: ${e.message}</div>`;
+  }
+}
+
+loadSession();
+</script>
+</body>
+</html>
+"""
+
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -1037,6 +1463,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        elif self.path.startswith("/api/session/"):
+            from scanner import get_session_transcript
+            session_id = self.path.split("/api/session/")[1].split("?")[0]
+            data = get_session_transcript(session_id)
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif self.path.startswith("/session/"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(SESSION_HTML_TEMPLATE.encode("utf-8"))
 
         else:
             self.send_response(404)
