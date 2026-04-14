@@ -148,6 +148,53 @@ def get_dashboard_data(db_path=DB_PATH, tz_offset=0):
             "cost":                bd["cost"],
         })
 
+    # ── Cache-eviction + compact events (client filters by range + model) ─────
+    cache_event_rows = conn.execute(f"""
+        SELECT
+            session_id,
+            timestamp,
+            {local_day}      as day,
+            gap_min,
+            category,
+            rewritten_tokens,
+            COALESCE(model, '') as model
+        FROM cache_events
+        ORDER BY timestamp
+    """).fetchall()
+    cache_events = [
+        {
+            "session_id":       r["session_id"],
+            "day":              r["day"],
+            "gap_min":          r["gap_min"],
+            "category":         r["category"],
+            "rewritten_tokens": r["rewritten_tokens"],
+            "model":            r["model"],
+        }
+        for r in cache_event_rows
+    ]
+
+    compact_event_rows = conn.execute(f"""
+        SELECT
+            session_id,
+            timestamp,
+            {local_day} as day,
+            trigger,
+            pre_tokens,
+            COALESCE(model, '') as model
+        FROM compact_events
+        ORDER BY timestamp
+    """).fetchall()
+    compact_events = [
+        {
+            "session_id": r["session_id"],
+            "day":        r["day"],
+            "trigger":    r["trigger"],
+            "pre_tokens": r["pre_tokens"],
+            "model":      r["model"],
+        }
+        for r in compact_event_rows
+    ]
+
     conn.close()
 
     return {
@@ -155,6 +202,8 @@ def get_dashboard_data(db_path=DB_PATH, tz_offset=0):
         "daily_by_model":      daily_by_model,
         "sessions_all":        sessions_all,
         "session_model_daily": session_model_daily,
+        "cache_events":        cache_events,
+        "compact_events":      compact_events,
         "generated_at":        (datetime.utcnow() + tz_delta).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -202,6 +251,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     justify-content: space-between;
   }
   header h1 { font-size: 14px; font-weight: 600; color: var(--accent); letter-spacing: -0.01em; }
+  .header-right { display: flex; align-items: center; gap: 10px; }
   header .meta { color: var(--muted); font-size: 11px; font-family: 'JetBrains Mono', monospace; }
 
   #filter-bar {
@@ -348,7 +398,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="top-bar">
 <header>
   <h1>Claude Code Usage Dashboard</h1>
-  <div class="meta" id="meta">Loading...</div>
+  <div class="header-right">
+    <div class="meta" id="meta">Loading...</div>
+    <button class="update-btn" id="update-btn" onclick="triggerUpdate()">Update</button>
+    <label class="auto-update-label">
+      <input type="checkbox" id="auto-update-cb" onchange="toggleAutoUpdate(this.checked)">
+      Auto-update
+    </label>
+  </div>
 </header>
 
 <div id="filter-bar">
@@ -374,12 +431,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <span>&ndash;</span>
     <input type="date" id="date-to" onchange="onCustomDateChange()">
   </div>
-  <div class="filter-sep"></div>
-  <button class="update-btn" id="update-btn" onclick="triggerUpdate()">Update</button>
-  <label class="auto-update-label">
-    <input type="checkbox" id="auto-update-cb" onchange="toggleAutoUpdate(this.checked)">
-    Auto-update
-  </label>
 </div>
 </div>
 
@@ -427,10 +478,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="footer-content">
     <p>Cost estimates based on Anthropic API pricing (<a href="https://claude.com/pricing#api" target="_blank">claude.com/pricing#api</a>) as of April 2026. Only models containing <em>opus</em>, <em>sonnet</em>, or <em>haiku</em> in the name are included in cost calculations. Actual costs for Max/Pro subscribers differ from API pricing.</p>
     <p>
-      GitHub: <a href="https://github.com/phuryn/claude-usage" target="_blank">https://github.com/phuryn/claude-usage</a>
+      GitHub: <a href="https://github.com/ipogosov/claude-usage" target="_blank">github.com/ipogosov/claude-usage</a>
       &nbsp;&middot;&nbsp;
-      Created by: <a href="https://www.productcompass.pm" target="_blank">The Product Compass Newsletter</a>
-      &nbsp;&middot;&nbsp;
+      Based on <a href="https://github.com/phuryn/claude-usage" target="_blank">phuryn/claude-usage</a>      &nbsp;&middot;&nbsp;
       License: MIT
     </p>
   </div>
@@ -459,6 +509,14 @@ function fmt(n) {
 }
 function fmtCost(c)    { return '$' + c.toFixed(4); }
 function fmtCostBig(c) { return '$' + c.toFixed(2); }
+function fmtGap(min) {
+  if (min == null) return '\u2014';
+  if (min < 1) return Math.round(min * 60) + 's';
+  if (min < 60) return Math.round(min) + 'm';
+  const h = Math.floor(min / 60);
+  const m = Math.round(min - h * 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
 
 // ── Chart colors ───────────────────────────────────────────────────────────
 const TOKEN_COLORS = {
@@ -767,6 +825,26 @@ function applyFilter() {
     cost:           byModel.reduce((s, m) => s + m.cost, 0),
   };
 
+  // Cache + compact event aggregates over the current date range + model filter.
+  // Events without a model (older rows before the schema migration) pass the
+  // model filter so they don't silently disappear.
+  const passesModel = e => !e.model || selectedModels.has(e.model);
+  const filteredCacheEv = (rawData.cache_events   || []).filter(e => inRange(e.day) && passesModel(e));
+  const filteredCompEv  = (rawData.compact_events || []).filter(e => inRange(e.day) && passesModel(e));
+  const gaps = filteredCacheEv.map(e => e.gap_min);
+  const cacheStats = {
+    count:     gaps.length,
+    mutation:  gaps.filter(g => g < 5).length,
+    save_1h:   gaps.filter(g => g >= 5 && g < 60).length,
+    exhausted: gaps.filter(g => g >= 60).length,
+  };
+  const compactCounts = {
+    manual: filteredCompEv.filter(e => e.trigger === 'manual').length,
+    auto:   filteredCompEv.filter(e => e.trigger === 'auto').length,
+  };
+  totals.cache_stats     = cacheStats;
+  totals.compact_counts  = compactCounts;
+
   // Update daily chart title
   let rangeTitle = RANGE_LABELS[selectedRange];
   if (selectedRange === 'custom') {
@@ -796,6 +874,14 @@ function renderStats(t) {
     { label: 'Cache Creation', value: fmt(t.cache_creation),       sub: 'writes to prompt cache' },
     { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: 'API pricing, Apr 2026', color: '#4ade80' },
   ];
+  const cs  = t.cache_stats    || { count: 0, mutation: 0, save_1h: 0, exhausted: 0 };
+  const cct = t.compact_counts || { manual: 0, auto: 0 };
+  stats.push({ label: 'Cache Evict.',     value: cs.count,     sub: 'in range' });
+  stats.push({ label: 'Prefix Mutations', value: cs.mutation,  sub: 'cache killed by context change' });
+  stats.push({ label: '1h Would Save',    value: cs.save_1h,   sub: '5m too short, 1h alive', color: cs.save_1h > 0 ? '#fcd34d' : undefined });
+  stats.push({ label: 'TTL Exhausted',    value: cs.exhausted, sub: 'both tiers dead' });
+  stats.push({ label: '/compact',         value: cct.manual,   sub: 'manual' });
+  stats.push({ label: 'Auto-compact',     value: cct.auto,     sub: 'context-full', color: cct.auto > 0 ? '#f87171' : undefined });
   document.getElementById('stats-row').innerHTML = stats.map(s => `
     <div class="stat-card">
       <div class="label">${s.label}</div>
@@ -1232,6 +1318,65 @@ SESSION_HTML_TEMPLATE = r"""<!DOCTYPE html>
   .cost-col .cost-col-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 4px; font-weight: 500; }
   .cost-col .cost-col-value { font-size: 16px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
   .cost-col .cost-col-pct { color: var(--muted); font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+
+  /* Eviction badge — shown inline in assistant turn header */
+  .eviction-badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 1px 6px; border-radius: 3px;
+    font-size: 10px; font-weight: 500;
+    font-family: 'JetBrains Mono', monospace;
+    text-transform: none; letter-spacing: 0;
+    background: rgba(252,211,77,0.12);
+    color: var(--yellow);
+    cursor: help;
+  }
+  .eviction-badge.ev-mutation {
+    background: rgba(125,111,99,0.15);
+    color: var(--muted);
+  }
+
+  /* Compact-boundary separator */
+  .turn--compact {
+    display: flex; align-items: center; gap: 12px;
+    padding: 4px 0; margin: 12px 0;
+    color: var(--muted);
+    font-size: 10px; font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .turn--compact::before, .turn--compact::after {
+    content: ''; flex: 1; height: 1px; background: var(--border);
+  }
+  .turn--compact.compact-auto { color: var(--red); }
+  .turn--compact.compact-auto::before,
+  .turn--compact.compact-auto::after {
+    background: rgba(248,113,113,0.25);
+  }
+
+  /* Filter toolbar above turn list */
+  .filter-toolbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 4px 0 14px;
+    font-size: 11px;
+  }
+  .filter-toolbar label {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 4px;
+    color: var(--muted); cursor: pointer; user-select: none;
+    background: rgba(255,255,255,0.03);
+    transition: color 0.12s, background 0.12s;
+  }
+  .filter-toolbar label:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+  .filter-toolbar label.active {
+    color: var(--accent);
+    background: rgba(217,119,87,0.1);
+  }
+  .filter-toolbar input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
+  .filter-toolbar .count {
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    margin-left: auto;
+  }
 </style>
 </head>
 <body>
@@ -1244,11 +1389,19 @@ SESSION_HTML_TEMPLATE = r"""<!DOCTYPE html>
 </header>
 <div class="container">
   <div class="summary-row" id="summary-row"></div>
+  <div class="filter-toolbar" id="filter-toolbar" style="display:none">
+    <label id="filter-evictions-label">
+      <input type="checkbox" id="cb-evictions-only" onchange="applyInspectorFilter()">
+      Show only cache expirations
+    </label>
+    <span class="count" id="filter-count"></span>
+  </div>
   <div id="turns-container"><div class="loading">Loading session data...</div></div>
 </div>
 
 <script>
 const SESSION_ID = window.location.pathname.split('/session/')[1] || '';
+let sessionData = null;
 
 function fmt(n) {
   if (n >= 1e9) return (n/1e9).toFixed(2)+'B';
@@ -1258,6 +1411,14 @@ function fmt(n) {
 }
 function fmtCost(c) { return '$' + c.toFixed(4); }
 function fmtCostBig(c) { return '$' + c.toFixed(2); }
+function fmtGap(min) {
+  if (min == null) return '\u2014';
+  if (min < 1) return Math.round(min * 60) + 's';
+  if (min < 60) return Math.round(min) + 'm';
+  const h = Math.floor(min / 60);
+  const m = Math.round(min - h * 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
 
 function getModelTagStyle(model) {
   const m = (model || '').toLowerCase();
@@ -1323,11 +1484,17 @@ function renderCostBar(bd, total) {
   ];
   return `<div class="cost-bar">${items.map(i => {
     const pct = total > 0 ? (i.val / total * 100) : 0;
-    return `<span class="cost-item ${i.cls}"><span class="ci-label">${i.label}</span> <span class="ci-val">$${i.val.toFixed(2)}</span> <span class="ci-pct">${pct.toFixed(0)}%</span></span>`;
+    return `<span class="cost-item ${i.cls}"><span class="ci-label">${i.label}</span> <span class="ci-val">${fmtCost(i.val)}</span> <span class="ci-pct">${pct.toFixed(0)}%</span></span>`;
   }).join('')}</div>`;
 }
 
 function renderTurn(turn, index) {
+  if (turn.type === 'compact') {
+    const cls = turn.trigger === 'auto' ? 'compact-auto' : 'compact-manual';
+    const label = turn.trigger === 'auto' ? 'Auto-compacted' : 'Compacted';
+    const pre = turn.pre_tokens ? ` \u00b7 ${fmt(turn.pre_tokens)} tok` : '';
+    return `<div class="turn--compact ${cls}">${label}${pre}</div>`;
+  }
   if (turn.type === 'user') {
     return `<div class="turn turn--user">
       <div class="turn-header">
@@ -1339,17 +1506,23 @@ function renderTurn(turn, index) {
   }
   if (turn.type === 'assistant') {
     const u = turn.usage || {};
-    const totalIn = (u.input_tokens||0) + (u.cache_read||0) + (u.cache_creation||0);
-    const tokenInfo = `in:${fmt(totalIn)} out:${fmt(u.output_tokens||0)}`;
-    const costStr = turn.cost > 0 ? `$${turn.cost.toFixed(2)}` : '';
+    const inTok = u.input_tokens || 0;
+    const cacheTok = (u.cache_read || 0) + (u.cache_creation || 0);
+    const tokenInfo = `in:${fmt(inTok)} cache:${fmt(cacheTok)} out:${fmt(u.output_tokens||0)}`;
+    const costStr = turn.cost > 0 ? fmtCost(turn.cost) : '';
     const modelTag = turn.model
       ? `<span class="model-tag" style="${getModelTagStyle(turn.model)}">${turn.model}</span>`
+      : '';
+    const ev = turn.eviction;
+    const evBadge = ev
+      ? `<span class="eviction-badge ${ev.category.startsWith('ttl') ? '' : 'ev-mutation'}" title="Cache rewritten after ${fmtGap(ev.gap_minutes)} \u2014 ${ev.category}">\u27f3 ${fmtGap(ev.gap_minutes)}</span>`
       : '';
     const costBar = renderCostBar(turn.cost_breakdown, turn.cost);
     return `<div class="turn turn--assistant">
       <div class="turn-header">
         <span>Assistant</span>
         ${modelTag}
+        ${evBadge}
         <span class="turn-tokens">${tokenInfo}</span>
         ${costStr ? `<span class="turn-cost">${costStr}</span>` : ''}
         <span class="turn-time">${formatTime(turn.timestamp)}</span>
@@ -1386,6 +1559,20 @@ async function loadSession() {
       { label: 'Cache Write', value: fmt(data.total_cache_creation) },
       { label: 'Est. Cost', value: fmtCostBig(data.total_cost), color: '#4ade80' },
     ];
+    const cs = data.cache_stats || {};
+    const cct = data.compact_counts || {};
+    const hasCache = (cs.count || 0) > 0;
+    const hasCompact = (cct.manual || 0) + (cct.auto || 0) > 0;
+    if (hasCache) {
+      stats.push({ label: 'Cache Evict.',     value: cs.count });
+      stats.push({ label: 'Prefix Mut.',      value: cs.mutation  || 0 });
+      stats.push({ label: '1h Would Save',    value: cs.save_1h   || 0, color: (cs.save_1h   || 0) > 0 ? '#fcd34d' : undefined });
+      stats.push({ label: 'TTL Exhausted',    value: cs.exhausted || 0 });
+    }
+    if (hasCompact) {
+      stats.push({ label: '/compact', value: cct.manual || 0 });
+      stats.push({ label: 'Auto-compact', value: cct.auto || 0, color: (cct.auto || 0) > 0 ? '#f87171' : undefined });
+    }
     let summaryHtml = stats.map(s =>
       `<div class="stat-card">
         <div class="label">${s.label}</div>
@@ -1417,16 +1604,48 @@ async function loadSession() {
     }
     document.getElementById('summary-row').innerHTML = summaryHtml;
 
-    // Render turns
-    if (data.turns.length === 0) {
-      document.getElementById('turns-container').innerHTML = '<div class="loading">No conversation data found for this session.</div>';
-      return;
-    }
-    document.getElementById('turns-container').innerHTML = data.turns.map(renderTurn).join('');
+    sessionData = data;
+
+    // Show filter toolbar if there's anything to filter on
+    const evCount = data.turns.filter(t => t.type === 'assistant' && t.eviction).length;
+    const cpCount = data.turns.filter(t => t.type === 'compact').length;
+    const hasFilterable = evCount > 0 || cpCount > 0;
+    document.getElementById('filter-toolbar').style.display = hasFilterable ? '' : 'none';
+    document.getElementById('filter-count').textContent = hasFilterable
+      ? `${evCount} eviction${evCount !== 1 ? 's' : ''} \u00b7 ${cpCount} compaction${cpCount !== 1 ? 's' : ''}`
+      : '';
+
+    renderTurns();
 
   } catch(e) {
     document.getElementById('turns-container').innerHTML = `<div class="error">Failed to load session: ${e.message}</div>`;
   }
+}
+
+function renderTurns() {
+  if (!sessionData) return;
+  const cb = document.getElementById('cb-evictions-only');
+  const filterOn = cb && cb.checked;
+  let turns = sessionData.turns;
+  if (filterOn) {
+    turns = turns.filter(t =>
+      (t.type === 'assistant' && t.eviction) || t.type === 'compact'
+    );
+  }
+  const container = document.getElementById('turns-container');
+  if (turns.length === 0) {
+    container.innerHTML = filterOn
+      ? '<div class="loading">No cache expirations or compactions in this session.</div>'
+      : '<div class="loading">No conversation data found for this session.</div>';
+    return;
+  }
+  container.innerHTML = turns.map(renderTurn).join('');
+}
+
+function applyInspectorFilter() {
+  const cb = document.getElementById('cb-evictions-only');
+  document.getElementById('filter-evictions-label').classList.toggle('active', cb.checked);
+  renderTurns();
 }
 
 loadSession();

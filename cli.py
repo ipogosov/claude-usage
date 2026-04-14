@@ -52,6 +52,12 @@ def cmd_reconcile():
     reconcile_sessions()
 
 
+def cmd_rebuild_events():
+    from scanner import rebuild_events_all, PROJECTS_DIR
+    print(f"Rebuilding events from {PROJECTS_DIR} ...")
+    rebuild_events_all()
+
+
 def cmd_today():
     conn = require_db()
     conn.row_factory = sqlite3.Row
@@ -252,16 +258,18 @@ USAGE = """
 Claude Code Usage Dashboard
 
 Usage:
-  python cli.py scan        Scan JSONL files and update database
-  python cli.py reconcile   Recompute session totals from turns table
-  python cli.py today       Show today's usage summary
-  python cli.py stats       Show all-time statistics
-  python cli.py dashboard   Scan + start dashboard at http://localhost:8087
+  python cli.py scan             Scan JSONL files and update database
+  python cli.py reconcile        Recompute session totals from turns table
+  python cli.py rebuild-events   Recompute cache + compact events from JSONL
+  python cli.py today            Show today's usage summary
+  python cli.py stats            Show all-time statistics
+  python cli.py dashboard        Scan + start dashboard at http://localhost:8087
 """
 
 COMMANDS = {
     "scan": cmd_scan,
     "reconcile": cmd_reconcile,
+    "rebuild-events": cmd_rebuild_events,
     "today": cmd_today,
     "stats": cmd_stats,
     "dashboard": cmd_dashboard,

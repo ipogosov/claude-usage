@@ -20,6 +20,8 @@ def get_db(db_path=DB_PATH):
 
 
 def init_db(conn):
+    # 1. Tables (CREATE IF NOT EXISTS). Old DBs have event tables without
+    #    source_file — we add the column below before any index touches it.
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS sessions (
             session_id      TEXT PRIMARY KEY,
@@ -54,9 +56,46 @@ def init_db(conn):
             lines   INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS cache_events (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id          TEXT,
+            timestamp           TEXT,
+            gap_min             REAL,
+            category            TEXT,
+            rewritten_tokens    INTEGER,
+            source_file         TEXT,
+            model               TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS compact_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT,
+            timestamp   TEXT,
+            trigger     TEXT,
+            pre_tokens  INTEGER,
+            source_file TEXT,
+            model       TEXT
+        );
+    """)
+    # 2. Migrations: add columns added after the first shipped schema. Each try
+    #    is a no-op if the column already exists.
+    for tbl in ("cache_events", "compact_events"):
+        for col in ("source_file TEXT", "model TEXT"):
+            try:
+                conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
+    # 3. Indexes (now safe — source_file exists everywhere).
+    conn.executescript("""
         CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
         CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp);
         CREATE INDEX IF NOT EXISTS idx_sessions_first ON sessions(first_timestamp);
+        CREATE INDEX IF NOT EXISTS idx_cache_events_ts ON cache_events(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_cache_events_session ON cache_events(session_id);
+        CREATE INDEX IF NOT EXISTS idx_cache_events_file ON cache_events(source_file);
+        CREATE INDEX IF NOT EXISTS idx_compact_events_ts ON compact_events(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_compact_events_session ON compact_events(session_id);
+        CREATE INDEX IF NOT EXISTS idx_compact_events_file ON compact_events(source_file);
     """)
     conn.commit()
 
@@ -165,6 +204,142 @@ def parse_jsonl_file(filepath, turns_offset=0):
         print(f"  Warning: error reading {filepath}: {e}")
 
     return list(session_meta.values()), turns, line_count
+
+
+def compute_events_for_file(filepath):
+    """Full-scan one JSONL and return per-session cache-eviction events and
+    compact-boundary events. Idempotent — safe to call repeatedly.
+
+    Returns:
+        (cache_events_by_sid, compact_events_by_sid)
+    where each event is a plain dict suitable for direct DB insertion.
+    """
+    sessions_main_turns = {}   # sid -> [{ts, cr, cc, cache_1h, cache_5m}, ...]
+    sessions_compacts = {}     # sid -> [{ts, trigger, pre_tokens}, ...]
+
+    try:
+        with open(filepath, encoding="utf-8", errors="replace") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                sid = record.get("sessionId")
+                if not sid:
+                    continue
+                ts = record.get("timestamp", "") or ""
+                rtype = record.get("type")
+
+                if rtype == "assistant" and not record.get("isSidechain"):
+                    msg = record.get("message") or {}
+                    usage = msg.get("usage") or {}
+                    model = msg.get("model", "") or ""
+                    cc_obj = usage.get("cache_creation") or {}
+                    if isinstance(cc_obj, dict):
+                        c1h = cc_obj.get("ephemeral_1h_input_tokens", 0) or 0
+                        c5m = cc_obj.get("ephemeral_5m_input_tokens", 0) or 0
+                    else:
+                        c1h = c5m = 0
+                    sessions_main_turns.setdefault(sid, []).append({
+                        "ts": ts,
+                        "model": model,
+                        "cr": usage.get("cache_read_input_tokens", 0) or 0,
+                        "cc": usage.get("cache_creation_input_tokens", 0) or 0,
+                        "cache_1h": c1h,
+                        "cache_5m": c5m,
+                    })
+                elif rtype == "system" and record.get("subtype") == "compact_boundary":
+                    cm = record.get("compactMetadata") or {}
+                    trig = cm.get("trigger", "manual")
+                    if trig not in ("manual", "auto"):
+                        trig = "manual"
+                    sessions_compacts.setdefault(sid, []).append({
+                        "ts": ts,
+                        "trigger": trig,
+                        "pre_tokens": cm.get("preTokens", 0) or 0,
+                    })
+    except Exception:
+        return {}, {}
+
+    cache_by_sid = {}
+    for sid, turns_list in sessions_main_turns.items():
+        turns_list.sort(key=lambda x: x["ts"])
+        compact_ts = sorted(c["ts"] for c in sessions_compacts.get(sid, []))
+        events = []
+        for i in range(1, len(turns_list)):
+            prev = turns_list[i - 1]
+            curr = turns_list[i]
+            if not (prev["cr"] >= 5000 and curr["cr"] < prev["cr"] * 0.2 and curr["cc"] >= 5000):
+                continue
+            if any(prev["ts"] < x < curr["ts"] for x in compact_ts):
+                continue
+            try:
+                ta = datetime.fromisoformat(prev["ts"].replace("Z", "+00:00"))
+                tb = datetime.fromisoformat(curr["ts"].replace("Z", "+00:00"))
+                gap_min = (tb - ta).total_seconds() / 60
+            except Exception:
+                continue
+            if gap_min > 60:
+                category = "ttl-1h"
+            elif gap_min > 5 and curr["cache_5m"] > curr["cache_1h"]:
+                category = "ttl-5m"
+            else:
+                category = "mutation"
+            events.append({
+                "timestamp": curr["ts"],
+                "gap_min": round(gap_min, 2),
+                "category": category,
+                "rewritten_tokens": curr["cc"],
+                "model": curr.get("model") or "",
+            })
+        if events:
+            cache_by_sid[sid] = events
+
+    # For each compact event, assign the model of the nearest preceding
+    # assistant turn in the same session (compactions don't carry a model
+    # field themselves).
+    compact_by_sid = {}
+    for sid, clist in sessions_compacts.items():
+        turns_list = sessions_main_turns.get(sid, [])
+        turns_list_sorted = sorted(turns_list, key=lambda x: x["ts"])
+        out = []
+        for c in clist:
+            model = ""
+            for t in turns_list_sorted:
+                if t["ts"] <= c["ts"] and t.get("model"):
+                    model = t["model"]
+                elif t["ts"] > c["ts"]:
+                    break
+            out.append({
+                "timestamp":  c["ts"],
+                "trigger":    c["trigger"],
+                "pre_tokens": c["pre_tokens"],
+                "model":      model,
+            })
+        compact_by_sid[sid] = out
+    return cache_by_sid, compact_by_sid
+
+
+def upsert_events_for_file(conn, filepath, cache_by_sid, compact_by_sid):
+    """Replace all events that originated from one JSONL file. Events from
+    other files (even for the same session) are left alone — a session may
+    be split across multiple files after `--resume`."""
+    conn.execute("DELETE FROM cache_events WHERE source_file = ?", (filepath,))
+    conn.execute("DELETE FROM compact_events WHERE source_file = ?", (filepath,))
+    for sid, events in cache_by_sid.items():
+        conn.executemany(
+            "INSERT INTO cache_events (session_id, timestamp, gap_min, category, rewritten_tokens, source_file, model) VALUES (?,?,?,?,?,?,?)",
+            [(sid, e["timestamp"], e["gap_min"], e["category"], e["rewritten_tokens"], filepath, e.get("model", "")) for e in events],
+        )
+    for sid, events in compact_by_sid.items():
+        conn.executemany(
+            "INSERT INTO compact_events (session_id, timestamp, trigger, pre_tokens, source_file, model) VALUES (?,?,?,?,?,?)",
+            [(sid, e["timestamp"], e["trigger"], e["pre_tokens"], filepath, e.get("model", "")) for e in events],
+        )
 
 
 def aggregate_sessions(session_metas, turns):
@@ -312,6 +487,10 @@ def scan(projects_dir=PROJECTS_DIR, db_path=DB_PATH, verbose=True):
                 total_sessions.add(s["session_id"])
             total_turns += len(turns)
 
+        # Recompute cache/compact events for this file (idempotent)
+        cache_by_sid, compact_by_sid = compute_events_for_file(filepath)
+        upsert_events_for_file(conn, filepath, cache_by_sid, compact_by_sid)
+
         conn.execute("""
             INSERT OR REPLACE INTO processed_files (path, mtime, lines)
             VALUES (?, ?, ?)
@@ -334,6 +513,30 @@ def scan(projects_dir=PROJECTS_DIR, db_path=DB_PATH, verbose=True):
     conn.close()
     return {"new": new_files, "updated": updated_files, "skipped": skipped_files,
             "turns": total_turns, "sessions": len(total_sessions)}
+
+
+def rebuild_events_all(projects_dir=PROJECTS_DIR, db_path=DB_PATH, verbose=True):
+    """Force-recompute cache_events + compact_events across all JSONL files.
+    Wipes the events tables first — leaves turns and sessions untouched."""
+    conn = get_db(db_path)
+    init_db(conn)
+    conn.execute("DELETE FROM cache_events")
+    conn.execute("DELETE FROM compact_events")
+    jsonl_files = glob.glob(str(projects_dir / "**" / "*.jsonl"), recursive=True)
+    total_cache = 0
+    total_compact = 0
+    for filepath in jsonl_files:
+        cache_by_sid, compact_by_sid = compute_events_for_file(filepath)
+        if not cache_by_sid and not compact_by_sid:
+            continue
+        upsert_events_for_file(conn, filepath, cache_by_sid, compact_by_sid)
+        total_cache += sum(len(v) for v in cache_by_sid.values())
+        total_compact += sum(len(v) for v in compact_by_sid.values())
+    conn.commit()
+    conn.close()
+    if verbose:
+        print(f"Rebuilt events: {total_cache} cache, {total_compact} compact across {len(jsonl_files)} files.")
+    return {"cache": total_cache, "compact": total_compact, "files": len(jsonl_files)}
 
 
 def reconcile_sessions(db_path=DB_PATH):
@@ -471,6 +674,12 @@ def get_session_transcript(session_id, projects_dir=PROJECTS_DIR, db_path=DB_PAT
                         output_tokens = usage.get("output_tokens", 0) or 0
                         cache_read = usage.get("cache_read_input_tokens", 0) or 0
                         cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
+                        cc_obj = usage.get("cache_creation") or {}
+                        if isinstance(cc_obj, dict):
+                            cache_1h = cc_obj.get("ephemeral_1h_input_tokens", 0) or 0
+                            cache_5m = cc_obj.get("ephemeral_5m_input_tokens", 0) or 0
+                        else:
+                            cache_1h = cache_5m = 0
 
                         content_blocks = []
                         for item in raw_content:
@@ -508,12 +717,15 @@ def get_session_transcript(session_id, projects_dir=PROJECTS_DIR, db_path=DB_PAT
                             "type": "assistant",
                             "timestamp": timestamp,
                             "model": model,
+                            "sidechain": bool(record.get("isSidechain")),
                             "content": content_blocks,
                             "usage": {
                                 "input_tokens": input_tokens,
                                 "output_tokens": output_tokens,
                                 "cache_read": cache_read,
                                 "cache_creation": cache_creation,
+                                "cache_1h": cache_1h,
+                                "cache_5m": cache_5m,
                             },
                             "cost": cost,
                             "cost_breakdown": {
@@ -524,25 +736,99 @@ def get_session_transcript(session_id, projects_dir=PROJECTS_DIR, db_path=DB_PAT
                             },
                         })
 
+                    elif rtype == "system" and record.get("subtype") == "compact_boundary":
+                        cm = record.get("compactMetadata") or {}
+                        trig = cm.get("trigger", "manual")
+                        if trig not in ("manual", "auto"):
+                            trig = "manual"
+                        turns.append({
+                            "type": "compact",
+                            "timestamp": timestamp,
+                            "trigger": trig,
+                            "pre_tokens": cm.get("preTokens", 0) or 0,
+                        })
+
         except Exception as e:
             continue
 
     # Sort by timestamp
     turns.sort(key=lambda t: t.get("timestamp", ""))
 
-    # Build summary
-    total_cost = sum(t.get("cost", 0) for t in turns if t["type"] == "assistant")
-    total_input = sum(t.get("usage", {}).get("input_tokens", 0) for t in turns if t["type"] == "assistant")
-    total_output = sum(t.get("usage", {}).get("output_tokens", 0) for t in turns if t["type"] == "assistant")
-    total_cache_read = sum(t.get("usage", {}).get("cache_read", 0) for t in turns if t["type"] == "assistant")
-    total_cache_creation = sum(t.get("usage", {}).get("cache_creation", 0) for t in turns if t["type"] == "assistant")
-    total_cost_breakdown = {
-        "input": sum(t.get("cost_breakdown", {}).get("input", 0) for t in turns if t["type"] == "assistant"),
-        "output": sum(t.get("cost_breakdown", {}).get("output", 0) for t in turns if t["type"] == "assistant"),
-        "cache_read": sum(t.get("cost_breakdown", {}).get("cache_read", 0) for t in turns if t["type"] == "assistant"),
-        "cache_creation": sum(t.get("cost_breakdown", {}).get("cache_creation", 0) for t in turns if t["type"] == "assistant"),
-    }
     assistant_turns = [t for t in turns if t["type"] == "assistant"]
+    compact_turns = [t for t in turns if t["type"] == "compact"]
+    compact_timestamps = sorted(t["timestamp"] for t in compact_turns if t.get("timestamp"))
+
+    # Detect cache-eviction events on consecutive main-thread assistant turns.
+    # Rule: prev had ≥5000 cache_read, current cache_read collapsed (<20% of prev),
+    # current cache_creation ≥5000. Pairs separated by a compact_boundary are skipped
+    # (post-compact rewrites are guaranteed, not "evictions"). Sidechain (subagent)
+    # turns are excluded — they belong to a different prompt/context and their
+    # cache_read isn't comparable to the main conversation.
+    main_thread = [t for t in assistant_turns if not t.get("sidechain")]
+    eviction_gaps = []
+    for i in range(1, len(main_thread)):
+        prev = main_thread[i - 1]
+        curr = main_thread[i]
+        pu = prev.get("usage", {})
+        cu = curr.get("usage", {})
+        prev_cr = pu.get("cache_read", 0)
+        curr_cr = cu.get("cache_read", 0)
+        curr_cc = cu.get("cache_creation", 0)
+        if not (prev_cr >= 5000 and curr_cr < prev_cr * 0.2 and curr_cc >= 5000):
+            continue
+        p_ts = prev.get("timestamp", "")
+        c_ts = curr.get("timestamp", "")
+        if any(p_ts < x < c_ts for x in compact_timestamps):
+            continue
+        try:
+            ta = datetime.fromisoformat(p_ts.replace("Z", "+00:00"))
+            tb = datetime.fromisoformat(c_ts.replace("Z", "+00:00"))
+            gap_min = (tb - ta).total_seconds() / 60
+        except Exception:
+            continue
+        tier_1h = cu.get("cache_1h", 0)
+        tier_5m = cu.get("cache_5m", 0)
+        if gap_min > 60:
+            category = "ttl-1h"
+        elif gap_min > 5 and tier_5m > tier_1h:
+            category = "ttl-5m"
+        else:
+            category = "mutation"
+        curr["eviction"] = {
+            "gap_minutes": round(gap_min, 2),
+            "category": category,
+            "rewritten_tokens": curr_cc,
+        }
+        eviction_gaps.append(gap_min)
+
+    ev_count = len(eviction_gaps)
+    # Bucket events by gap to answer "would 1h tier help?":
+    #   <5m   = prefix mutation, TTL irrelevant
+    #   5-60m = 5m tier died but 1h would still be alive
+    #   >=60m = both tiers dead, no TTL setting would save it
+    cache_stats = {
+        "count":     ev_count,
+        "mutation":  sum(1 for g in eviction_gaps if g < 5),
+        "save_1h":   sum(1 for g in eviction_gaps if 5 <= g < 60),
+        "exhausted": sum(1 for g in eviction_gaps if g >= 60),
+    }
+
+    compact_counts = {"manual": 0, "auto": 0}
+    for t in compact_turns:
+        compact_counts[t.get("trigger", "manual")] += 1
+
+    # Build token/cost summary
+    total_cost = sum(t.get("cost", 0) for t in assistant_turns)
+    total_input = sum(t["usage"].get("input_tokens", 0) for t in assistant_turns)
+    total_output = sum(t["usage"].get("output_tokens", 0) for t in assistant_turns)
+    total_cache_read = sum(t["usage"].get("cache_read", 0) for t in assistant_turns)
+    total_cache_creation = sum(t["usage"].get("cache_creation", 0) for t in assistant_turns)
+    total_cost_breakdown = {
+        "input": sum(t.get("cost_breakdown", {}).get("input", 0) for t in assistant_turns),
+        "output": sum(t.get("cost_breakdown", {}).get("output", 0) for t in assistant_turns),
+        "cache_read": sum(t.get("cost_breakdown", {}).get("cache_read", 0) for t in assistant_turns),
+        "cache_creation": sum(t.get("cost_breakdown", {}).get("cache_creation", 0) for t in assistant_turns),
+    }
 
     first_ts = turns[0]["timestamp"] if turns else ""
     last_ts = turns[-1]["timestamp"] if turns else ""
@@ -567,6 +853,8 @@ def get_session_transcript(session_id, projects_dir=PROJECTS_DIR, db_path=DB_PAT
         "total_cache_read": total_cache_read,
         "total_cache_creation": total_cache_creation,
         "turn_count": len(assistant_turns),
+        "cache_stats": cache_stats,
+        "compact_counts": compact_counts,
         "turns": turns,
     }
 
